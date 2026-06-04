@@ -100,8 +100,14 @@ export async function initializeDiscordSdk(): Promise<{
 
 export function getAvatarUrl(userId: string, avatarHash: string | null): string {
   if (!avatarHash) {
-    // Default Discord avatar
-    const defaultIndex = Number(BigInt(userId) % BigInt(5));
+    // Default Discord avatar - handle mock user IDs that can't be converted to BigInt
+    let defaultIndex = 0;
+    try {
+      defaultIndex = Number(BigInt(userId) % BigInt(5));
+    } catch {
+      // For mock users, use a hash of the string
+      defaultIndex = userId.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0) % 5;
+    }
     return `https://cdn.discordapp.com/embed/avatars/${defaultIndex}.png`;
   }
   return `https://cdn.discordapp.com/avatars/${userId}/${avatarHash}.png`;

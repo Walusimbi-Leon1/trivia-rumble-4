@@ -143,8 +143,8 @@ export default function GamePage() {
       await submitAnswer(room.id, userId, String(answerIndex), timeElapsed);
 
       // Calculate score if correct
-      const currentQuestion = room.questions[room.currentQuestionIndex];
-      if (answerIndex === currentQuestion.correctAnswer) {
+      const currentQuestion = room.questions?.[room.currentQuestionIndex];
+      if (currentQuestion && answerIndex === currentQuestion.correctAnswer) {
         // Score based on speed: faster = more points
         // Max 100 points, minimum 10 points
         const speedBonus = Math.max(
@@ -226,7 +226,7 @@ export default function GamePage() {
   }
 
   const isHost = room.hostId === userId;
-  const currentQuestion = room.questions[room.currentQuestionIndex];
+  const currentQuestion = room.questions?.[room.currentQuestionIndex] ?? null;
 
   switch (gameState) {
     case "lobby":
