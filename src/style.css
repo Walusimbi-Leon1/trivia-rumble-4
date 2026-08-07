@@ -243,6 +243,15 @@ body { display: flex; flex-direction: column; min-height: 100vh; }
 .small { font-size: 12px; }
 .center { text-align: center; }
 
+/* ── Legal pages (privacy / terms) ── */
+.card h2 { font-size: 22px; margin-bottom: 4px; }
+.card h3 { font-size: 15px; margin: 18px 0 8px; color: var(--primary-2); }
+.card p { margin: 8px 0; line-height: 1.6; font-size: 14.5px; }
+.card ul { margin: 8px 0 8px 20px; line-height: 1.65; font-size: 14.5px; }
+.card li { margin-bottom: 5px; }
+.card a { color: var(--primary-2); text-decoration: none; }
+.card a:hover { text-decoration: underline; }
+
 @media (max-width: 720px) {
   .game-grid { grid-template-columns: 1fr; }
   .lb-card { position: static; max-height: 320px; order: 2; }
