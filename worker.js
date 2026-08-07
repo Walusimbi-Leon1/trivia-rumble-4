@@ -1,15 +1,26 @@
 /**
  * Trivia Rumble Elite — Cloudflare Worker
  *
- * Proven pattern (Dice Arena 2026-08-07, Arrow Blast / Pop Party 2026-08-06):
- *  - /api/exchange        → Discord OAuth2 code → access_token (confidential client)
- *  - /api/trivia          → trivia question generation (Groq if key set, else built-in bank)
- *  - /firebase/stream/*   → Firebase RTDB SSE stream proxy (realtime in Discord sandbox)
- *  - /firebase/*          → Firebase RTDB REST proxy (Discord sandbox blocks direct calls)
- *  - everything else      → static assets from the inlined STATIC map
+ * Serves the whole game: static assets, Discord OAuth exchange,
+ * question generation (opencode.ai / big-pickle), Firebase proxies.
+ *
+ * Game model (single GLOBAL room, time-sliced — see README):
+ *  - trivia/global/game    = { questionStart, slotDuration, bankLen, startedAt }
+ *  - trivia/global/bank/<i> = { question, options, correctAnswer }
+ *  - trivia/global/players/<uid> = { id, username, avatarUrl, score, lastSeen, online }  (persistent)
+ *  - trivia/global/answers/<slot>/<uid> = { answer, at }   (per-question answers)
+ *  - trivia/global/meta    = { generating: <ts> }          (bank generation lock)
+ *
+ * All clients compute the current question deterministically:
+ *   slot = floor((now - questionStart) / slotDuration)
+ *   question = bank[slot % bank.length]
  */
 
 const FB_DEFAULT_HOST = "pop-party-1-default-rtdb.firebaseio.com";
+const SLOT_DURATION = 20000;   // 20 seconds per question
+const BANK_BATCH = 20;         // questions generated per top-up
+const BANK_MAX = 250;          // reset bank above this size
+const GEN_LOCK_MS = 45000;     // lock window for concurrent top-ups
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -29,11 +40,51 @@ function notFound() {
   return new Response("Not found", { status: 404 });
 }
 
+// ── Firebase direct helpers (server side) ───────────────────────────────────
+function fbUrl(env, path) {
+  const host = (env.FB_HOST || FB_DEFAULT_HOST).replace(/^https?:\/\//, "");
+  return `https://${host}/${path}.json`;
+}
+
+async function fbGet(env, path) {
+  const res = await fetch(fbUrl(env, path));
+  if (!res.ok) throw new Error(`fbGet ${path} → ${res.status}`);
+  return res.json();
+}
+
+async function fbPut(env, path, data) {
+  const res = await fetch(fbUrl(env, path), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`fbPut ${path} → ${res.status}`);
+  return res.json();
+}
+
+async function fbPatch(env, path, data) {
+  const res = await fetch(fbUrl(env, path), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`fbPatch ${path} → ${res.status}`);
+  return res.json();
+}
+
+async function fbDelete(env, path) {
+  const res = await fetch(fbUrl(env, path), { method: "DELETE" });
+  if (!res.ok) throw new Error(`fbDelete ${path} → ${res.status}`);
+  return res.json();
+}
+
+function bankCount(bank) {
+  return bank && typeof bank === "object" ? Object.keys(bank).length : 0;
+}
+
 // ── Discord OAuth exchange (Arrow Blast pattern) ────────────────────────────
 async function handleExchange(request, env) {
-  if (request.method !== "POST") {
-    return json({ error: "Method not allowed" }, 405);
-  }
+  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
   let code;
   try {
     const body = await request.json();
@@ -41,13 +92,11 @@ async function handleExchange(request, env) {
   } catch {
     return json({ error: "Bad request — code required" }, 400);
   }
-  if (!code || typeof code !== "string") {
-    return json({ error: "Bad request — code required" }, 400);
-  }
+  if (!code || typeof code !== "string") return json({ error: "Bad request — code required" }, 400);
 
   const clientId = env.DISCORD_CLIENT_ID;
   const clientSecret = env.DISCORD_CLIENT_SECRET;
-  const redirectUri = env.REDIRECT_URI || "https://trivia-rumble-elite.walusimbileon1.workers.dev/";
+  const redirectUri = env.REDIRECT_URI;
 
   if (!clientId || !clientSecret) {
     return json({ error: "Server configuration error — DISCORD_CLIENT_ID / DISCORD_CLIENT_SECRET not set" }, 500);
@@ -76,11 +125,63 @@ async function handleExchange(request, env) {
   }
 }
 
-// ── Trivia question generation ──────────────────────────────────────────────
+// ── Question generation via opencode.ai (big-pickle) ────────────────────────
+async function generateWithOpenCode(prompt, env) {
+  const apiKey = env.OPENCODE_API_KEY;
+  if (!apiKey) throw new Error("OPENCODE_API_KEY not set");
+  const model = env.MODEL || "big-pickle";
+  const response = await fetch("https://opencode.ai/zen/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: "You are a trivia question generator. Generate engaging, factual trivia questions with exactly 4 answer options and one correct answer. Always respond with valid JSON only — no markdown, no extra text." },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.9,
+      max_tokens: 4096,
+    }),
+  });
+  if (!response.ok) throw new Error(`opencode.ai ${response.status}: ${(await response.text()).slice(0, 200)}`);
+  const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content) throw new Error("opencode.ai empty response");
+  return content;
+}
+
+function parseQuestions(raw, count) {
+  const cleaned = raw.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+  const start = cleaned.indexOf("[");
+  const end = cleaned.lastIndexOf("]");
+  if (start < 0 || end <= start) throw new Error("No JSON array in response");
+  const parsed = JSON.parse(cleaned.slice(start, end + 1));
+  if (!Array.isArray(parsed)) throw new Error("Response is not an array");
+  const out = [];
+  for (const q of parsed) {
+    if (typeof q?.question !== "string" || !Array.isArray(q?.options) || q.options.length !== 4) continue;
+    let a = q.correctAnswer;
+    if (typeof a === "string") a = parseInt(a, 10);
+    if (typeof a !== "number" || a < 0 || a > 3) continue;
+    out.push({ question: q.question, options: q.options.map(String), correctAnswer: a });
+    if (out.length >= count) break;
+  }
+  if (!out.length) throw new Error("No valid questions parsed");
+  return out;
+}
+
+async function generateQuestions(count, env) {
+  const prompt = `Generate ${count} unique trivia questions spanning a fun mix of categories: science, history, geography, entertainment, sports, technology, general knowledge. Vary the difficulty.
+Return ONLY a JSON array (no markdown) with exactly this structure:
+[{"question":"Question text?","options":["A","B","C","D"],"correctAnswer":0}]
+"correctAnswer" must be the index (0-3) of the correct option.`;
+  const raw = await generateWithOpenCode(prompt, env);
+  return parseQuestions(raw, count);
+}
+
+// ── Built-in question bank (instant seed + fallback) ────────────────────────
 const CATEGORIES = ["general", "science", "history", "geography", "entertainment", "sports", "technology", "art", "literature", "music"];
 
-// Built-in question bank — guaranteed to work, no external API needed.
-// Each category has 16 questions. correctAnswer = index (0-3) of the right option.
 const QUESTION_BANK = {
   general: [
     { q: "What is the capital of France?", o: ["Paris", "Lyon", "Marseille", "Nice"], a: 0 },
@@ -156,7 +257,6 @@ const QUESTION_BANK = {
   ],
   entertainment: [
     { q: "Who played Iron Man in the Marvel movies?", o: ["Chris Evans", "Robert Downey Jr.", "Chris Hemsworth", "Mark Ruffalo"], a: 1 },
-    { q: "What is the highest-grossing film of all time (2020s)?", o: ["Avatar", "Avengers: Endgame", "Titanic", "Star Wars"], a: 1 },
     { q: "Who sang 'Thriller'?", o: ["Prince", "Michael Jackson", "Stevie Wonder", "James Brown"], a: 1 },
     { q: "Which TV series features the character Walter White?", o: ["The Wire", "Breaking Bad", "Ozark", "Narcos"], a: 1 },
     { q: "Who directed 'Jurassic Park'?", o: ["James Cameron", "Steven Spielberg", "George Lucas", "Ridley Scott"], a: 1 },
@@ -171,6 +271,7 @@ const QUESTION_BANK = {
     { q: "Who is known as the 'King of Pop'?", o: ["Elvis Presley", "Michael Jackson", "Prince", "Freddie Mercury"], a: 1 },
     { q: "Which game franchise features Mario?", o: ["Sonic", "Nintendo", "Sega", "Xbox"], a: 1 },
     { q: "Who wrote the 'Game of Thrones' books?", o: ["J.R.R. Tolkien", "George R.R. Martin", "J.K. Rowling", "C.S. Lewis"], a: 1 },
+    { q: "What is the highest-grossing film of all time (2020s)?", o: ["Avatar", "Avengers: Endgame", "Titanic", "Star Wars"], a: 1 },
   ],
   sports: [
     { q: "How many players are on a soccer team?", o: ["9", "10", "11", "12"], a: 2 },
@@ -264,87 +365,145 @@ const QUESTION_BANK = {
   ],
 };
 
-function pickQuestions(category, count) {
-  const bank = QUESTION_BANK[category] || QUESTION_BANK.general;
-  const shuffled = [...bank].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, count).map((item) => ({
-    question: item.q,
-    options: item.o,
-    correctAnswer: item.a,
-  }));
-}
-
-const GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "mixtral-8x7b-32768", "llama-3.1-8b-instant", "gemma2-9b-it"];
-
-async function generateWithGroq(prompt, model, apiKey) {
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: "You are a trivia question generator. Generate engaging, factual trivia questions with exactly 4 answer options. Always respond with valid JSON only, no markdown or extra text." },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.8,
-      max_tokens: 4096,
-    }),
-  });
-  if (!response.ok) throw new Error(`Groq API error (${model}): ${await response.text()}`);
-  const data = await response.json();
-  return data.choices[0].message.content;
-}
-
-async function generateTriviaGroq(category, count, apiKey) {
-  const prompt = `Generate ${count} unique trivia questions about ${category}.
-Each question should have exactly 4 options with only one correct answer.
-Return ONLY a JSON array with this exact structure (no markdown):
-[{"question":"What is...?","options":["A","B","C","D"],"correctAnswer":0}]
-The correctAnswer is the index (0-3) of the correct option.`;
-  let lastError = null;
-  for (const model of GROQ_MODELS) {
-    try {
-      const response = await generateWithGroq(prompt, model, apiKey);
-      const cleaned = response.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-      const questions = JSON.parse(cleaned);
-      if (!Array.isArray(questions) || questions.length === 0) throw new Error("Invalid response structure");
-      for (const q of questions) {
-        if (typeof q.question !== "string" || !Array.isArray(q.options) || q.options.length !== 4 || typeof q.correctAnswer !== "number" || q.correctAnswer < 0 || q.correctAnswer > 3) {
-          throw new Error("Invalid question structure");
-        }
-      }
-      return questions.slice(0, count);
-    } catch (err) {
-      lastError = err;
-      console.warn(`Groq model ${model} failed:`, err.message);
+function builtinSeed() {
+  const all = [];
+  for (const cat of CATEGORIES) {
+    for (const item of QUESTION_BANK[cat]) {
+      all.push({ question: item.q, options: item.o, correctAnswer: item.a });
     }
   }
-  throw lastError || new Error("All models failed");
+  // deterministic-ish shuffle (Math.random is fine here)
+  for (let i = all.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [all[i], all[j]] = [all[j], all[i]];
+  }
+  return all;
 }
 
-async function handleTrivia(request, env) {
-  if (request.method !== "POST") {
-    return json({ error: "Method not allowed" }, 405);
-  }
-  let body = {};
+function pickQuestions(count) {
+  const all = builtinSeed();
+  return all.slice(0, Math.min(count, all.length));
+}
+
+// ── /api/trivia — ensure the bank has questions ─────────────────────────────
+async function handleTrivia(request, env, ctx) {
+  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+  const body = await request.json().catch(() => ({}));
+  const count = Math.max(5, Math.min(30, Number(body.count) || BANK_BATCH));
+
   try {
-    body = await request.json();
-  } catch {
-    /* defaults */
-  }
-  const category = CATEGORIES.includes(String(body.category || "").toLowerCase()) ? String(body.category).toLowerCase() : "general";
-  const count = Math.max(1, Math.min(20, Number(body.count) || 10));
+    const meta = (await fbGet(env, "trivia/global/meta").catch(() => null)) || {};
+    const bank = (await fbGet(env, "trivia/global/bank").catch(() => null)) || {};
+    const len = bankCount(bank);
 
-  // Prefer Groq when a key is configured; always fall back to the built-in bank.
-  if (env.GROQ_API_KEY) {
-    try {
-      const questions = await generateTriviaGroq(category, count, env.GROQ_API_KEY);
-      return json({ questions, source: "groq" });
-    } catch (err) {
-      console.warn("[Trivia] Groq failed, using bank:", err.message);
+    // Someone is already generating — return current state
+    if (meta.generating && Date.now() - meta.generating < GEN_LOCK_MS) {
+      return json({ bankLen: len, generating: true });
     }
+
+    // Empty bank → seed instantly with built-in questions so the game
+    // is playable immediately; top up with AI questions in the background.
+    if (len === 0) {
+      await fbPut(env, "trivia/global/meta", { generating: Date.now() });
+      const seed = builtinSeed();
+      const patch = {};
+      seed.forEach((q, i) => (patch[i] = q));
+      await fbPut(env, "trivia/global/bank", patch);
+      const game = await fbGet(env, "trivia/global/game").catch(() => null);
+      await fbPut(env, "trivia/global/game", {
+        questionStart: Date.now(),
+        slotDuration: SLOT_DURATION,
+        bankLen: seed.length,
+        startedAt: game?.startedAt || Date.now(),
+      });
+      // Kick off AI generation in the background (doesn't block the response)
+      ctxWait(ctx, env, count);
+      return json({ bankLen: seed.length, source: "seed" });
+    }
+
+    // Bank low → generate a fresh batch via opencode.ai
+    await fbPut(env, "trivia/global/meta", { generating: Date.now() });
+    let questions;
+    try {
+      questions = await generateQuestions(count, env);
+    } catch (err) {
+      console.error("[Trivia] opencode.ai failed, using built-in:", err.message);
+      questions = pickQuestions(count);
+    }
+
+    if (len + questions.length > BANK_MAX) {
+      // Bank too big → reset: fresh bank + restart the question clock
+      const patch = {};
+      questions.forEach((q, i) => (patch[i] = q));
+      await fbPut(env, "trivia/global/bank", patch);
+      await fbDelete(env, "trivia/global/answers").catch(() => {});
+      await fbPut(env, "trivia/global/game", {
+        questionStart: Date.now(),
+        slotDuration: SLOT_DURATION,
+        bankLen: questions.length,
+        startedAt: Date.now(),
+      });
+      await fbPut(env, "trivia/global/meta", { generating: 0 });
+      return json({ bankLen: questions.length, reset: true });
+    }
+
+    const patch = {};
+    questions.forEach((q, i) => (patch[len + i] = q));
+    await fbPatch(env, "trivia/global/bank", patch);
+    const game = await fbGet(env, "trivia/global/game").catch(() => null);
+    if (game) {
+      await fbPatch(env, "trivia/global/game", { bankLen: len + questions.length });
+    } else {
+      await fbPut(env, "trivia/global/game", {
+        questionStart: Date.now(),
+        slotDuration: SLOT_DURATION,
+        bankLen: len + questions.length,
+        startedAt: Date.now(),
+      });
+    }
+    await fbPut(env, "trivia/global/meta", { generating: 0 });
+    return json({ bankLen: len + questions.length, source: questions[0]?.question ? "ai" : "bank" });
+  } catch (err) {
+    console.error("[Trivia] error:", err.message);
+    await fbPut(env, "trivia/global/meta", { generating: 0 }).catch(() => {});
+    return json({ error: err.message }, 500);
   }
-  return json({ questions: pickQuestions(category, count), source: "bank" });
+}
+
+// Background AI top-up (used when seeding) — run after the response is sent.
+function ctxWait(ctx, env, count) {
+  ctx?.waitUntil?.(
+    (async () => {
+      try {
+        let questions;
+        try {
+          questions = await generateQuestions(count, env);
+        } catch (err) {
+          console.error("[Trivia] bg opencode.ai failed:", err.message);
+          await fbPut(env, "trivia/global/meta", { generating: 0, lastError: err.message }).catch(() => {});
+          return;
+        }
+        const bank = (await fbGet(env, "trivia/global/bank").catch(() => null)) || {};
+        const len = bankCount(bank);
+        const patch = {};
+        questions.forEach((q, i) => (patch[len + i] = q));
+        await fbPatch(env, "trivia/global/bank", patch);
+        const game = await fbGet(env, "trivia/global/game").catch(() => null);
+        if (game) await fbPatch(env, "trivia/global/game", { bankLen: len + questions.length });
+        await fbPut(env, "trivia/global/meta", { generating: 0 });
+        console.log("[Trivia] bg top-up appended", questions.length);
+      } catch (err) {
+        console.error("[Trivia] bg top-up error:", err.message);
+        await fbPut(env, "trivia/global/meta", { generating: 0, lastError: err.message }).catch(() => {});
+      }
+    })()
+  );
+}
+
+// ── /api/time — clock sync for question timing ──────────────────────────────
+async function handleTime(request, env) {
+  const game = await fbGet(env, "trivia/global/game").catch(() => null);
+  return json({ now: Date.now(), game: game || null });
 }
 
 // ── Firebase proxies (Dice Arena pattern) ───────────────────────────────────
@@ -390,7 +549,6 @@ async function sseProxy(request, env, url) {
 }
 
 // ── Static assets (inlined at build time by build.js) ───────────────────────
-// ── Static assets (inlined at build time by build.js) ───────────────────────
 // Each value is replaced by a JSON string literal of the file contents.
 // NOTE: do not wrap these in backticks — the files contain backticks of
 // their own (template literals), which would break the outer literal.
@@ -414,7 +572,7 @@ const CONTENT_TYPES = {
 };
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -422,7 +580,8 @@ export default {
       if (path.startsWith("/firebase/stream/")) return await sseProxy(request, env, url);
       if (path.startsWith("/firebase/")) return await restProxy(request, env, url);
       if (path === "/api/exchange" && request.method === "POST") return await handleExchange(request, env);
-      if (path === "/api/trivia") return await handleTrivia(request, env);
+      if (path === "/api/trivia") return await handleTrivia(request, env, ctx);
+      if (path === "/api/time") return await handleTime(request, env);
       if (path === "/privacy") return html(STATIC["privacy.html"]);
       if (path === "/terms") return html(STATIC["terms.html"]);
       if (path === "/" || path === "") {

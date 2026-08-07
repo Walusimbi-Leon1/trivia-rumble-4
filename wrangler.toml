@@ -3,5 +3,14 @@ main = "dist/worker.js"
 compatibility_date = "2026-08-07"
 
 [vars]
-REDIRECT_URI = "https://trivia-rumble-elite.walusimbileon1.workers.dev/"
+# Discord OAuth (confidential client)
+DISCORD_CLIENT_ID = "1535428947624460328"
+DISCORD_CLIENT_SECRET = "DISCORD_CLIENT_SECRET_REMOVED"
+REDIRECT_URI = "https://trivia-rumble-elite.walusimbileon1.workers.dev"
+
+# Question generation — opencode.ai (big-pickle)
+OPENCODE_API_KEY = "SK_OPENCODE_API_KEY_REMOVED"
+MODEL = "big-pickle"
+
+# Firebase Realtime Database (shared, public-writable)
 FB_HOST = "pop-party-1-default-rtdb.firebaseio.com"

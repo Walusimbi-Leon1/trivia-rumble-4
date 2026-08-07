@@ -22,7 +22,7 @@
     <section id="screen-loading" class="screen">
       <div class="center-box">
         <div class="spinner big"></div>
-        <p class="muted" id="loading-msg">Connecting to Discord…</p>
+        <p class="muted" id="loading-msg">Connecting to the arena…</p>
       </div>
     </section>
 
@@ -35,86 +35,38 @@
       </div>
     </section>
 
-    <!-- Lobby -->
-    <section id="screen-lobby" class="screen hidden">
-      <div class="column">
-        <div class="text-center">
-          <h2 class="gradient-text">Trivia Rumble Elite</h2>
-          <p class="muted">Waiting for players to join…</p>
-        </div>
+    <!-- Game -->
+    <section id="screen-game" class="screen hidden">
+      <div class="game-grid">
 
-        <div class="card">
-          <h3 class="card-title">🔑 Room</h3>
-          <div class="room-code-row">
-            <input id="lobby-room-code" class="room-code" readonly value="">
-            <button id="btn-copy" class="btn btn-outline">📋</button>
+        <div class="column main-col">
+          <div class="q-meta">
+            <span id="q-number" class="q-number">Question 1</span>
+            <span id="q-answered" class="q-answered">⚡ 0/1 answered</span>
           </div>
-          <p class="muted small" id="lobby-copy-link">Copy invite link</p>
+
+          <div class="timer-wrap">
+            <div class="timer-track"><div id="q-progress" class="timer-fill"></div></div>
+            <div class="timer-label"><span id="q-time" class="q-time">20s</span></div>
+          </div>
+
+          <div class="card q-card">
+            <h2 id="q-text" class="q-text">Loading question…</h2>
+          </div>
+
+          <div id="q-options" class="opt-grid"></div>
+
+          <div id="q-result" class="result-box hidden"></div>
         </div>
 
-        <div class="card">
-          <h3 class="card-title" id="lobby-player-count">Players (0)</h3>
-          <div id="lobby-players"></div>
-        </div>
+        <aside class="column side-col">
+          <div class="card lb-card">
+            <h3 class="card-title">🏆 Leaderboard</h3>
+            <div id="lb-list"></div>
+            <p id="my-rank" class="muted small my-rank-line"></p>
+          </div>
+        </aside>
 
-        <div id="lobby-host-controls" class="card hidden">
-          <h3 class="card-title">⚡ Category</h3>
-          <div id="lobby-categories" class="cat-grid"></div>
-        </div>
-
-        <div id="lobby-guest-controls" class="card hidden">
-          <p class="muted center">Selected category: <b id="lobby-nonhost-category">General Knowledge</b></p>
-          <p class="muted center small">Waiting for the host to start the game…</p>
-        </div>
-
-        <button id="btn-start" class="btn btn-primary btn-lg hidden">⚡ Start Game</button>
-      </div>
-    </section>
-
-    <!-- Question -->
-    <section id="screen-question" class="screen hidden">
-      <div class="column">
-        <div class="q-meta">
-          <span id="q-number" class="q-number">Question 1 / 10</span>
-          <span id="q-answered" class="q-answered">👥 0/1 answered</span>
-        </div>
-
-        <div class="timer-wrap">
-          <div class="timer-track"><div id="q-progress" class="timer-fill"></div></div>
-          <div class="timer-label"><span id="q-time" class="q-time">15s</span></div>
-        </div>
-
-        <div class="card q-card">
-          <h2 id="q-text" class="q-text">Loading question…</h2>
-        </div>
-
-        <div id="q-options" class="opt-grid"></div>
-
-        <div id="q-result" class="result-box hidden"></div>
-      </div>
-    </section>
-
-    <!-- Results -->
-    <section id="screen-results" class="screen hidden">
-      <div class="column">
-        <div class="text-center">
-          <h2 class="gradient-text">Game Over!</h2>
-        </div>
-
-        <div id="results-winner"></div>
-        <div id="results-mine"></div>
-
-        <div class="card">
-          <h3 class="card-title">🏆 Leaderboard</h3>
-          <div id="results-list"></div>
-        </div>
-
-        <div id="results-host-controls" class="hidden">
-          <button id="btn-play-again" class="btn btn-primary btn-lg">🔁 Play Again</button>
-        </div>
-        <div id="results-guest-controls" class="card hidden">
-          <p class="muted center">Waiting for the host to start a new game…</p>
-        </div>
       </div>
     </section>
 
