@@ -1,0 +1,7 @@
+name = "trivia-rumble-elite"
+main = "dist/worker.js"
+compatibility_date = "2026-08-07"
+
+[vars]
+REDIRECT_URI = "https://trivia-rumble-elite.walusimbileon1.workers.dev/"
+FB_HOST = "pop-party-1-default-rtdb.firebaseio.com"

@@ -1,33 +1,76 @@
-# trivia-rumble-4
+# 🎮 Trivia Rumble Elite
 
-This is a [Next.js](https://nextjs.org) project bootstrapped with [v0](https://v0.app).
+**Fast-paced multiplayer trivia for Discord Activities — and the browser.**
 
-## Built with v0
+Up to 10 players compete in the same room answering trivia questions with
+speed bonuses. Fastest correct answer = most points. Host picks the category
+(General, Science, History, Geography, Entertainment, Sports, Technology,
+Art, Literature, Music), starts the game, and the app auto-advances through
+10 questions with 15 seconds each.
 
-This repository is linked to a [v0](https://v0.app) project. You can continue developing by visiting the link below -- start new chats to make changes, and v0 will push commits directly to this repo. Every merge to `main` will automatically deploy.
+**Live:** https://trivia-rumble-elite.walusimbileon1.workers.dev
+**Repo:** https://github.com/Walusimbi-Leon1/trivia-rumble-4
 
-[Continue working on v0 →](https://v0.app/chat/projects/prj_jCDfYKLSjaITo0yAgUKOOANvS52X)
+## 🎮 How to Play
 
-## Getting Started
+1. **Create or join a room** — inside a Discord voice channel, everyone in the
+   channel shares the same room automatically. In a browser, copy the invite
+   link from the lobby and share it.
+2. **Host picks a category** and hits **Start Game**.
+3. **10 questions, 15 seconds each.** Answer fast — the quicker you answer
+   correctly, the more points you get (max 100, min 10).
+4. **Top score wins!** The host can hit **Play Again** for a rematch.
 
-First, run the development server:
+## 🛠️ Architecture
+
+Built on the **proven Discord Activity pattern** from Dice Arena / Arrow Blast:
+
+- **Vanilla HTML/CSS/JS** — no build step, no framework. Everything is served
+  by a single Cloudflare Worker.
+- **Discord integration** (`src/discord.js`) — vendored same-origin
+  `@discord/embedded-app-sdk` (Discord's Activity sandbox blocks external
+  hosts), `authorize()` handles both result shapes (public client PKCE →
+  `access_token` directly; confidential client → code exchanged via
+  `/api/exchange`), with graceful guest fallback when not in Discord.
+- **Data layer** (`src/firebase.js`) — Firebase Realtime Database accessed
+  ONLY through the worker's same-origin proxy (`/firebase/*` REST +
+  `/firebase/stream/*` SSE), because the Discord sandbox blocks direct
+  `firebaseio.com` calls. Works identically in Discord and browsers.
+- **Questions** (`/api/trivia`) — built-in question bank (10 categories × 16
+  questions), with optional Groq AI generation when `GROQ_API_KEY` is set
+  (falls back to the bank automatically).
+
+## 🚀 Deploy
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
+node build.js        # inlines src/* into dist/worker.js
+wrangler deploy      # requires CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Environment variables (wrangler.toml / [vars]):
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Var | Purpose |
+| --- | --- |
+| `DISCORD_CLIENT_ID` | Discord application client ID (from the Developer Portal) |
+| `DISCORD_CLIENT_SECRET` | Discord application client secret |
+| `REDIRECT_URI` | OAuth redirect URI — the worker's own URL (e.g. `https://trivia-rumble-elite.walusimbileon1.workers.dev/`) |
+| `GROQ_API_KEY` | *Optional* — enables AI-generated questions |
+| `FB_HOST` | Firebase RTDB host (defaults to `pop-party-1-default-rtdb.firebaseio.com`) |
 
-## Learn More
+## 📋 Discord Developer Portal setup
 
-To learn more, take a look at the following resources:
+1. Create an application named **Trivia Rumble Elite**.
+2. Under **OAuth2**, add the redirect URL: `https://trivia-rumble-elite.walusimbileon1.workers.dev/`
+3. In the app's **General Information** → **Activity**, add the worker URL as
+   the Activity URL (e.g. `https://trivia-rumble-elite.walusimbileon1.workers.dev/`).
+4. Send the client ID and client secret to LA5 to configure the worker vars.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-- [v0 Documentation](https://v0.app/docs) - learn about v0 and how to use it.
+## 📄 Files
+
+- `src/` — client source (HTML, CSS, JS, vendored Discord SDK)
+- `worker.js` — Cloudflare Worker source (routes, OAuth exchange, trivia API, Firebase proxies)
+- `build.js` — inlines `src/*` into `dist/worker.js`
+- `deploy.sh` / `wrangler.toml` — deployment
+
+---
+*Trivia Rumble Elite — formerly trivia-rumble-4. Not affiliated with Discord Inc.*
