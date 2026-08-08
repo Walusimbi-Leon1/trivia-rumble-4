@@ -47,9 +47,9 @@ echo "$RESP" | jq -c '{success, errors: [.errors[].message], id: .result.id, mod
 curl -s -X PUT -H "Authorization: Bearer $CF_API_TOKEN" \
   -H "Content-Type: application/json" \
   "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/$NAME/secrets" \
-  --data "{\"name\":\"OPENCODE_API_KEY\",\"text\":\"$OPENCODE_API_KEY\"}" >/dev/null
+  --data "{\"name\":\"OPENCODE_API_KEY\",\"text\":\"$OPENCODE_API_KEY\",\"type\":\"secret_text\"}" >/dev/null
 curl -s -X PUT -H "Authorization: Bearer $CF_API_TOKEN" \
   -H "Content-Type: application/json" \
   "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/$NAME/secrets" \
-  --data "{\"name\":\"DISCORD_CLIENT_SECRET\",\"text\":\"$DISCORD_CLIENT_SECRET\"}" >/dev/null
+  --data "{\"name\":\"DISCORD_CLIENT_SECRET\",\"text\":\"$DISCORD_CLIENT_SECRET\",\"type\":\"secret_text\"}" >/dev/null
 echo "Script secrets set: OPENCODE_API_KEY, DISCORD_CLIENT_SECRET"
