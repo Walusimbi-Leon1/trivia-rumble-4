@@ -522,11 +522,17 @@ async function restProxy(request, env, url) {
   headers.delete("connection");
   headers.delete("cf-connecting-ip");
   headers.set("origin", url.origin);
-  const init = { method: request.method, headers, redirect: "follow" };
-  if (request.method !== "GET" && request.method !== "HEAD") {
+  // Honor X-Fb-Method (client fallback for sandboxes that block PUT/PATCH/DELETE)
+  const method = headers.get("x-fb-method") || request.method;
+  headers.delete("x-fb-method");
+  const init = { method, headers, redirect: "follow" };
+  if (method !== "GET" && method !== "HEAD") {
     init.body = request.body;
   }
   const res = await fetch(target, init);
+  if (!url.pathname.startsWith("/firebase/trivia/global/meta/logs")) {
+    logRequest(env, method, url.pathname, res.status);
+  }
   const outHeaders = new Headers(res.headers);
   outHeaders.set("Cache-Control", "no-store");
   outHeaders.set("Access-Control-Allow-Origin", url.origin);
@@ -546,6 +552,27 @@ async function sseProxy(request, env, url) {
   headers.set("X-Accel-Buffering", "no");
   headers.set("Access-Control-Allow-Origin", url.origin);
   return new Response(upstream.body, { status: 200, headers });
+}
+
+// ── Request diagnostics (ring buffer in Firebase, for debugging) ────────────
+let logBuffer = [];
+let logFlushing = false;
+function logRequest(env, method, path, status) {
+  logBuffer.push({ m: method, p: path.slice(0, 60), s: status, t: Date.now() });
+  if (logBuffer.length > 30) logBuffer.shift();
+  if (logFlushing) return;
+  logFlushing = true;
+  ctxWaitSafe(env, () => {
+    try {
+      return fbPut(env, "trivia/global/meta/logs", logBuffer.slice(-25));
+    } finally {
+      logFlushing = false;
+    }
+  });
+}
+function ctxWaitSafe(env, fn) {
+  // fire-and-forget; never throws
+  fn().catch(() => {});
 }
 
 // ── Static assets (inlined at build time by build.js) ───────────────────────

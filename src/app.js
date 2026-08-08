@@ -474,25 +474,45 @@ function tick() {
 async function boot() {
   showScreen("loading");
 
+  // OAuth popup (Discord web-client authorize): show confirmation, don't boot.
+  if (window.opener && !window.opener.closed) {
+    $("screen-loading").classList.add("hidden");
+    $("screen-error").classList.add("hidden");
+    const gs = $("screen-game");
+    gs.classList.remove("hidden");
+    gs.innerHTML = `<div class="card center-box" style="min-height:40vh">
+      <div style="font-size:52px">✅</div>
+      <h2>You're connected!</h2>
+      <p class="muted">Return to the game — your Discord name is ready.</p>
+    </div>`;
+    return;
+  }
+
   const identity = await resolveIdentity();
   me = identity;
   renderHeader();
 
+  // Every step is independently resilient — one failure must never brick the
+  // whole game. Firebase writes failing (sandbox restrictions, rate limits)
+  // degrade to local-only play instead of an error screen.
+  const fails = [];
+  await syncTime();
   try {
-    await syncTime();
     await joinGlobal();
-    await ensureBank();
-    subscribe();
-
-    startPresence();
-
-    setInterval(tick, 100);
-    setInterval(syncTime, 5 * 60 * 1000);
-
-    $("btn-retry").onclick = () => window.location.reload();
   } catch (err) {
-    console.error("Boot error:", err);
-    showError("Failed to connect: " + (err.message || err));
+    fails.push("join: " + (err.message || err));
+  }
+  await ensureBank();
+  subscribe();
+  startPresence();
+
+  setInterval(tick, 100);
+  setInterval(syncTime, 5 * 60 * 1000);
+  $("btn-retry").onclick = () => window.location.reload();
+
+  if (fails.length) {
+    console.warn("Degraded boot:", fails);
+    // still playable — local mode with the live question stream
   }
 }
 

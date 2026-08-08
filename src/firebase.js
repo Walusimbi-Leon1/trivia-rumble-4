@@ -20,11 +20,26 @@ function ns(path) {
 }
 
 async function fbRequest(path, method, body) {
-  const res = await fetch(ns(path), {
+  const url = ns(path);
+  let res = await fetch(url, {
     method,
     headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  // Some sandboxes/edges only allow GET+POST (405 on PUT/PATCH/DELETE).
+  // Fall back to POST with X-Fb-Method — the worker honors it as the
+  // upstream method. Belt-and-braces for Discord's Activity sandbox.
+  if (!res.ok && method !== "GET" && method !== "POST") {
+    console.warn(`[fb] ${method} → ${res.status}, retrying via POST`);
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Fb-Method": method,
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const text = await res.text();
   return text ? JSON.parse(text) : null;
