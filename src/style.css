@@ -226,7 +226,11 @@ body { display: flex; flex-direction: column; min-height: 100vh; }
   background: rgba(255, 255, 255, 0.03);
   margin-bottom: 5px;
 }
-.lb-row.me { background: rgba(124, 92, 255, 0.14); border: 1px solid rgba(124, 92, 255, 0.45); }
+.lb-row.me {
+  background: linear-gradient(90deg, rgba(124, 92, 255, 0.28), rgba(124, 92, 255, 0.08));
+  border: 1px solid var(--primary);
+  box-shadow: 0 0 14px rgba(124, 92, 255, 0.3), inset 0 0 8px rgba(124, 92, 255, 0.12);
+}
 .lb-row.first { background: linear-gradient(90deg, rgba(255, 209, 102, 0.12), rgba(255, 209, 102, 0.03)); border: 1px solid rgba(255, 209, 102, 0.4); }
 .lb-row.offline { opacity: 0.45; }
 .lb-rank { width: 26px; text-align: center; flex-shrink: 0; display: flex; justify-content: center; }
@@ -264,11 +268,12 @@ body { display: flex; flex-direction: column; min-height: 100vh; }
 .plat-badge svg { width: 10px; height: 10px; display: block; }
 .plat-badge.discord { background: #5865f2; color: #fff; }
 .plat-badge.browser { background: rgba(255, 255, 255, 0.1); color: var(--muted); }
+.lb-meta { font-size: 10px; font-weight: 700; color: var(--muted); margin-left: 6px; }
 .lb-live {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 10px; font-weight: 700; color: var(--success);
   background: rgba(46, 204, 113, 0.12); border: 1px solid rgba(46, 204, 113, 0.3);
-  padding: 2px 8px; border-radius: 999px; margin-left: 6px; vertical-align: 2px;
+  padding: 2px 8px; border-radius: 999px; vertical-align: 2px;
 }
 .lb-live-dot {
   width: 6px; height: 6px; border-radius: 50%; background: var(--success);
@@ -276,9 +281,12 @@ body { display: flex; flex-direction: column; min-height: 100vh; }
 }
 @keyframes lb-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 .lb-divider {
-  text-align: center; font-size: 10px; letter-spacing: 0.8px; text-transform: uppercase;
-  color: var(--muted); opacity: 0.7; padding: 6px 0 2px;
+  display: flex; align-items: center; gap: 10px;
+  color: var(--muted); opacity: 0.6;
+  font-size: 11px; font-weight: 700; letter-spacing: 2px;
+  padding: 5px 2px;
 }
+.lb-divider span { flex: 1; border-top: 2px dashed rgba(154, 160, 192, 0.35); }
 .dot {
   width: 8px; height: 8px;
   border-radius: 50%;

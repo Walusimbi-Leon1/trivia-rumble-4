@@ -9,8 +9,8 @@
  * Players + scores persist in Firebase — leaving never deletes them.
  */
 
-import { initDiscord, isDiscord } from "./discord.js";
-import { dbRead, dbWrite, dbUpdate, dbDelete, dbWatch } from "./firebase.js";
+import { initDiscord, isDiscord, inDiscordFrame } from "./discord.js";
+import { dbRead, dbWrite, dbUpdate, dbDelete } from "./firebase.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const SLOT_DURATION = 20000;   // must match worker
@@ -27,7 +27,6 @@ let currentSlot = -1;
 let myAnswer = null;
 let hasAnswered = false;
 let revealed = false;
-let es = null;
 let requestingBank = false;
 let lastAnswerGain = 0;
 
@@ -108,78 +107,53 @@ function currentQuestion() {
 // ── Firebase paths ──────────────────────────────────────────────────────────
 const P = "trivia/global";
 
-// ── SSE patching ────────────────────────────────────────────────────────────
-function setPath(obj, path, value) {
-  const parts = path.split("/").filter(Boolean);
-  let cur = obj;
-  for (let i = 0; i < parts.length - 1; i++) {
-    const key = parts[i];
-    if (!cur[key] || typeof cur[key] !== "object") cur[key] = {};
-    cur = cur[key];
-  }
-  const last = parts[parts.length - 1];
-  if (value === null || value === undefined) delete cur[last];
-  else cur[last] = value;
-}
+// ── Realtime sync (robust polling) ─────────────────────────────────────────
+// NOTE: Firebase SSE through the Cloudflare Worker proxy freezes after the
+// initial snapshot (verified 2026-08-08) — live updates never arrive. So we
+// poll players + the current slot's answers every few seconds instead. The
+// game is 20s/slot, so 3s polling keeps everything fresh with tiny load.
+function startSync() {
+  const visible = () => document.visibilityState !== "hidden";
 
-function onPatch(relPath, data) {
-  const path = relPath || "/";
-  const parts = path.split("/").filter(Boolean);
-
-  // Whole-node snapshot (initial SSE "put" on the root): populate everything.
-  // Without this the game stays on "Connecting to the arena…" until a REST
-  // read succeeds.
-  if (!parts.length && data && typeof data === "object") {
-    if (data.game) game = data.game;
-    if (data.bank) bank = bankArray(data.bank);
-    if (data.players) players = data.players;
-    refresh();
-    return;
-  }
-
-  const a = parts[0];
-
-  if (a === "game") {
-    if (parts.length === 1) game = data && typeof data === "object" ? data : null;
-    else {
-      game = { ...(game || {}) };
-      setPath(game, parts.slice(1).join("/"), data);
-    }
-  } else if (a === "bank") {
-    if (parts.length === 1) {
-      bank = bankArray(data);
-    } else {
-      const key = Number(parts[1]);
-      if (!Number.isNaN(key)) {
-        if (data === null) {
-          bank = bank.filter((_, i) => i !== key);
-        } else {
-          const nb = bank.slice();
-          while (nb.length <= key) nb.push(null);
-          nb[key] = data;
-          bank = nb;
-        }
+  const syncPlayers = async () => {
+    try {
+      const data = await dbRead(`${P}/players`).catch(() => null);
+      if (data && typeof data === "object") {
+        players = data;
+        refresh();
       }
+    } catch (e) {
+      /* keep last known state */
     }
-  } else if (a === "players") {
-    if (parts.length === 1) {
-      players = data && typeof data === "object" ? data : {};
-    } else {
-      players = { ...players };
-      setPath(players, parts.slice(1).join("/"), data);
-    }
-  } else if (a === "answers") {
-    const slotKey = Number(parts[1]);
-    if (slotKey === currentSlot) {
-      answers = { ...answers };
-      if (parts.length <= 2) {
-        answers = data && typeof data === "object" ? data : {};
-      } else {
-        setPath(answers, parts.slice(2).join("/"), data);
+  };
+
+  const syncAnswers = async () => {
+    if (currentSlot < 0) return;
+    try {
+      const data = await dbRead(`${P}/answers/${currentSlot}`).catch(() => null);
+      if (data && typeof data === "object") {
+        answers = data;
+        refresh();
       }
+    } catch (e) {
+      /* keep last known state */
     }
-  }
-  refresh();
+  };
+
+  const beat = () => {
+    if (!visible()) return;   // save bandwidth while the tab is hidden
+    syncPlayers();
+    syncAnswers();
+  };
+
+  beat();
+  setInterval(beat, 3000);
+  document.addEventListener("visibilitychange", () => {
+    if (visible()) {
+      syncPlayers();
+      syncAnswers();
+    }
+  });
 }
 
 // ── Boot: identity ──────────────────────────────────────────────────────────
@@ -190,24 +164,38 @@ async function resolveIdentity() {
       id: "u" + discordInfo.user.id,
       username: discordInfo.user.global_name || discordInfo.user.username || "Player",
       avatarUrl: `https://cdn.discordapp.com/avatars/${discordInfo.user.id}/${discordInfo.user.avatar || "0"}.png`,
+      platform: "discord",
     };
   }
-  // Guest: stable id in localStorage so scores persist across reloads
+  // Guest: stable id in localStorage so scores persist across reloads.
+  // Browser and Discord-fallback guests use SEPARATE keys, so the same person
+  // playing in a Discord Activity AND a browser tab gets two distinct records
+  // instead of the two sessions fighting over one id.
+  const key = inDiscordFrame ? "tre_guest_id_discord" : "tre_guest_id";
   let gid = null;
   try {
-    gid = localStorage.getItem("tre_guest_id");
+    gid = localStorage.getItem(key);
   } catch (e) { /* private mode */ }
   if (!gid) {
     gid = "g" + Math.random().toString(36).slice(2, 10);
     try {
-      localStorage.setItem("tre_guest_id", gid);
+      localStorage.setItem(key, gid);
     } catch (e) { /* ignore */ }
   }
   return {
     id: gid,
-    username: "Guest " + Math.floor(Math.random() * 1000),
+    username: guestNameFromId(gid),  // stable + unique per session
     avatarUrl: "",
+    platform: isDiscord ? "discord" : "browser",
   };
+}
+
+// Deterministic guest name derived from the id: stable across reloads and
+// unique per session (no shared localStorage name collisions).
+function guestNameFromId(gid) {
+  let sum = 0;
+  for (const c of gid) sum = (sum * 31 + c.charCodeAt(0)) % 997;
+  return "Guest " + (100 + (sum % 900));
 }
 
 // ── Sync clock with the worker ──────────────────────────────────────────────
@@ -392,45 +380,68 @@ function updateAnsweredCount() {
 }
 
 function renderLeaderboard() {
+  const LB_TOP = 7;   // top tier shown before the divider
+
   const all = Object.values(players).filter((p) => p && typeof p === "object");
-  const online = all.filter((p) => p.online).sort((a, b) => (b.score || 0) - (a.score || 0));
-  // offline players with points stay visible (dimmed) so the board keeps its history
-  const offline = all.filter((p) => !p.online && (p.score || 0) > 0).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 10);
-  const rows = [...online, ...offline].slice(0, 30);
+  // Always include yourself — even if the players map is stale/empty on boot,
+  // your row renders so you can never be "missing" from the board.
+  if (!all.some((p) => p.id === me.id)) all.push({ ...me, online: true });
+
+  const sorted = all.sort(
+    (a, b) => (b.score || 0) - (a.score || 0) || (b.lastSeen || 0) - (a.lastSeen || 0)
+  );
+  const myIdx = sorted.findIndex((p) => p.id === me.id);
+  const myRank = myIdx + 1;
+
+  // Order: top 7, divider, then me pinned as #8 when I'm outside the top tier
+  // (players between 8 and me appear below me for scrolling). Ranks stay true.
+  const ranked = sorted.map((p, i) => ({ p, rank: i + 1 }));
+  const ordered =
+    myRank > LB_TOP
+      ? [
+          ...ranked.slice(0, LB_TOP),
+          ranked[myIdx],
+          ...ranked.slice(LB_TOP, myIdx),
+          ...ranked.slice(myIdx + 1),
+        ]
+      : ranked;
 
   const el = $("lb-list");
   if (!el) return;
-  const liveCount = online.length;
+  const liveCount = sorted.filter((p) => p.online).length;
   const titleEl = $("lb-title");
   if (titleEl) {
     titleEl.innerHTML =
-      `Leaderboard <span class="lb-live"><span class="lb-live-dot"></span>${liveCount} live</span>`;
+      `Leaderboard <span class="lb-meta">${sorted.length} players · ` +
+      `<span class="lb-live"><span class="lb-live-dot"></span>${liveCount} live</span></span>`;
   }
 
-  el.innerHTML = rows.length
-    ? rows
-        .map((p, i) => {
+  el.innerHTML = ordered.length
+    ? ordered
+        .map((item, i) => {
+          const p = item.p;
+          const rank = item.rank;
           const isOffline = !p.online;
-          const rank = i + 1;
           const mine = p.id === me.id;
-          return `
+          const divider = i === LB_TOP ? '<div class="lb-divider"><span></span>· · ·<span></span></div>' : "";
+          return (
+            divider +
+            `
           <div class="lb-row ${mine ? "me" : ""} ${rank === 1 ? "first" : ""} ${isOffline ? "offline" : ""}">
             <span class="lb-rank">${rankBadge(rank)}</span>
             ${avatarHtml(p, 32)}
             <span class="lb-name">${escapeHtml(p.username)}${mine ? '<span class="you-tag">you</span>' : ""}</span>
             ${platformBadge(p)}
             <span class="lb-score">${starSvg(11)} ${p.score || 0}</span>
-          </div>`;
+          </div>`
+          );
         })
-        .join("") +
-        (offline.length ? '<div class="lb-divider">earlier today</div>' : "")
+        .join("")
     : '<p class="muted center small">No players yet — open the game and be first!</p>';
 
-  const mine = players[me.id];
-  const myRank = all.filter((p) => (p?.score || 0) > (mine?.score || 0)).length + 1;
   const rankEl = $("my-rank");
   if (rankEl) {
-    rankEl.innerHTML = `Your rank: <b>#${myRank}</b> · ${starSvg(11)} ${mine?.score || 0} pts`;
+    rankEl.innerHTML = `Your rank: <b>#${myRank}</b> · ${starSvg(11)} ${me.score || 0} pts`;
   }
 }
 
@@ -566,7 +577,7 @@ async function boot() {
     fails.push("join: " + (err.message || err));
   }
   await ensureBank();
-  subscribe();
+  startSync();
   startPresence();
 
   setInterval(tick, 100);
@@ -577,13 +588,6 @@ async function boot() {
     console.warn("Degraded boot:", fails);
     // still playable — local mode with the live question stream
   }
-}
-
-function subscribe() {
-  es = dbWatch(P, onPatch);
-  es.onerror = () => {
-    /* EventSource auto-reconnects */
-  };
 }
 
 boot();
