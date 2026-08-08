@@ -2,7 +2,7 @@
 # Deploy Trivia Rumble Elite to Cloudflare Workers
 set -euo pipefail
 
-T=CF_CLOUDFLARE_TOKEN_REMOVED
+T="${CF_API_TOKEN:-CF_CLOUDFLARE_TOKEN_REMOVED}"
 ACC=d21711ae11a362bc4d57d4fd48deae61
 NAME=trivia-rumble-elite
 
@@ -11,14 +11,14 @@ node build.js
 
 BOUNDARY="----tre-deploy-$(date +%s)"
 METADATA=$(cat <<JSON
-{"main_module":"worker.js","bindings":[{"type":"plain_text","name":"REDIRECT_URI","text":"https://${NAME}.walusimbileon1.workers.dev/"},{"type":"plain_text","name":"FB_HOST","text":"pop-party-1-default-rtdb.firebaseio.com"}]}
+{"main_module":"worker.js","bindings":[{"type":"plain_text","name":"REDIRECT_URI","text":"https://${NAME}.walusimbileon1.workers.dev/"},{"type":"plain_text","name":"FB_HOST","text":"pop-party-1-default-rtdb.firebaseio.com"},{"type":"plain_text","name":"OPENCODE_API_KEY","text":"${OPENCODE_API_KEY:-SK_OPENCODE_API_KEY_REMOVED}"},{"type":"plain_text","name":"MODEL","text":"big-pickle"},{"type":"plain_text","name":"DISCORD_CLIENT_ID","text":"1535428947624460328"},{"type":"plain_text","name":"DISCORD_CLIENT_SECRET","text":"${DISCORD_CLIENT_SECRET:-DISCORD_CLIENT_SECRET_REMOVED}"}]}
 JSON
 )
 
 {
   printf -- "--%s\r\n" "$BOUNDARY"
   printf 'Content-Disposition: form-data; name="worker.js"\r\n'
-  printf 'Content-Type: application/javascript\r\n\r\n'
+  printf 'Content-Type: application/javascript+module\r\n\r\n'
   cat dist/worker.js
   printf "\r\n--%s\r\n" "$BOUNDARY"
   printf 'Content-Disposition: form-data; name="metadata"\r\n'
