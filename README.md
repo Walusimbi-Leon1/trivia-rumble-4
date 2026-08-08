@@ -36,10 +36,17 @@ Built on the proven Discord Activity pattern (Dice Arena / Arrow Blast):
   question from shared state: `slot = floor((now - questionStart) / 20s)`,
   `question = bank[slot % bank.length]`. All players see the same question at
   the same time, with clock sync via `/api/time`.
-- **Question generation** — `/api/trivia` generates fresh questions with
-  **opencode.ai (big-pickle model)**. A 160-question built-in bank seeds the
-  game instantly on first load, and AI questions top up the bank continuously.
-  If the AI is rate-limited, the built-in bank keeps the game running.
+- **Question generation (GitHub Actions)** — the game clock drains ~180
+  questions/hour (20s each, runs 24/7). A scheduled workflow
+  (`.github/workflows/generate-questions.yml`) generates fresh questions in
+  batches with **opencode.ai (big-pickle model)** every 30 minutes and writes
+  them straight into the Firebase bank, keeping ~2 hours of runway. It runs
+  from GitHub runners because **opencode.ai blocks Cloudflare Workers egress**
+  (error 1042) — the worker itself can never reach it. The worker keeps a
+  built-in bank as emergency fallback, and resets the question clock when the
+  game is badly behind (instant recovery from "Preparing new questions…").
+  Manual refill: `Actions → Generate Trivia Questions → Run workflow`.
+  Repo secret: `OPENCODE_API_KEY`.
 - **Discord integration** — vendored same-origin `@discord/embedded-app-sdk`,
   `authorize()` handles both OAuth shapes (PKCE access_token directly, or
   confidential code → `/api/exchange`), timeouts, and graceful guest fallback.
