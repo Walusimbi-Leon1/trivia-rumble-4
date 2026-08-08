@@ -16,7 +16,10 @@ const NS = "pop-party-1-default-rtdb";
 
 function ns(path) {
   const sep = path.includes("?") ? "&" : "?";
-  return `${FB}/${path}${sep}ns=${NS}`;
+  // Firebase REST requires the .json suffix — without it the request hits the
+  // legacy secret-key endpoint and returns 401/405 (this was the "Connecting
+  // to the arena…" hang).
+  return `${FB}/${path}.json${sep}ns=${NS}`;
 }
 
 async function fbRequest(path, method, body) {

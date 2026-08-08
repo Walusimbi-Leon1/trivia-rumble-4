@@ -101,6 +101,18 @@ function setPath(obj, path, value) {
 function onPatch(relPath, data) {
   const path = relPath || "/";
   const parts = path.split("/").filter(Boolean);
+
+  // Whole-node snapshot (initial SSE "put" on the root): populate everything.
+  // Without this the game stays on "Connecting to the arena…" until a REST
+  // read succeeds.
+  if (!parts.length && data && typeof data === "object") {
+    if (data.game) game = data.game;
+    if (data.bank) bank = bankArray(data.bank);
+    if (data.players) players = data.players;
+    refresh();
+    return;
+  }
+
   const a = parts[0];
 
   if (a === "game") {
