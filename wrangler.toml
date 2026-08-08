@@ -2,14 +2,18 @@ name = "trivia-rumble-elite"
 main = "dist/worker.js"
 compatibility_date = "2026-08-07"
 
+# ⚠️ SECRETS POLICY — READ THIS
+# OPENCODE_API_KEY and DISCORD_CLIENT_SECRET are NOT stored in this repo.
+# They live as encrypted Cloudflare Worker secrets (set by deploy.sh from
+# environment variables) and, for the question pipeline, as the GitHub
+# Actions secret `OPENCODE_API_KEY`. Never commit real secret values here.
+
 [vars]
-# Discord OAuth (confidential client)
+# Discord OAuth (confidential client) — client ID is public
 DISCORD_CLIENT_ID = "1535428947624460328"
-DISCORD_CLIENT_SECRET = "DISCORD_CLIENT_SECRET_REMOVED"
 REDIRECT_URI = "https://trivia-rumble-elite.walusimbileon1.workers.dev"
 
 # Question generation — opencode.ai (big-pickle)
-OPENCODE_API_KEY = "SK_OPENCODE_API_KEY_REMOVED"
 MODEL = "big-pickle"
 
 # Firebase Realtime Database (shared, public-writable)

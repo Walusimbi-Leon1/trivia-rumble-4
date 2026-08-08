@@ -1,36 +1,55 @@
 #!/bin/bash
 # Deploy Trivia Rumble Elite to Cloudflare Workers
+# Secrets are NOT stored in this repo. Pass them via environment:
+#   CF_API_TOKEN          (Cloudflare API token, Workers Scripts edit)
+#   OPENCODE_API_KEY      (opencode.ai API key)
+#   DISCORD_CLIENT_SECRET (Discord app secret)
 set -euo pipefail
 
-T="${CF_API_TOKEN:-CF_CLOUDFLARE_TOKEN_REMOVED}"
 ACC=d21711ae11a362bc4d57d4fd48deae61
 NAME=trivia-rumble-elite
+
+: "${CF_API_TOKEN:?CF_API_TOKEN required (Cloudflare API token)}"
+: "${OPENCODE_API_KEY:?OPENCODE_API_KEY required (opencode.ai key)}"
+: "${DISCORD_CLIENT_SECRET:?DISCORD_CLIENT_SECRET required (Discord app secret)}"
 
 cd /tmp/tre
 node build.js
 
 BOUNDARY="----tre-deploy-$(date +%s)"
 METADATA=$(cat <<JSON
-{"main_module":"worker.js","bindings":[{"type":"plain_text","name":"REDIRECT_URI","text":"https://${NAME}.walusimbileon1.workers.dev/"},{"type":"plain_text","name":"FB_HOST","text":"pop-party-1-default-rtdb.firebaseio.com"},{"type":"plain_text","name":"OPENCODE_API_KEY","text":"${OPENCODE_API_KEY:-SK_OPENCODE_API_KEY_REMOVED}"},{"type":"plain_text","name":"MODEL","text":"big-pickle"},{"type":"plain_text","name":"DISCORD_CLIENT_ID","text":"1535428947624460328"},{"type":"plain_text","name":"DISCORD_CLIENT_SECRET","text":"${DISCORD_CLIENT_SECRET:-DISCORD_CLIENT_SECRET_REMOVED}"}]}
+{"main_module":"worker.js","bindings":[{"type":"plain_text","name":"REDIRECT_URI","text":"https://${NAME}.walusimbileon1.workers.dev/"},{"type":"plain_text","name":"FB_HOST","text":"pop-party-1-default-rtdb.firebaseio.com"},{"type":"plain_text","name":"MODEL","text":"big-pickle"},{"type":"plain_text","name":"DISCORD_CLIENT_ID","text":"1535428947624460328"}]}
 JSON
 )
 
 {
   printf -- "--%s\r\n" "$BOUNDARY"
-  printf 'Content-Disposition: form-data; name="worker.js"\r\n'
-  printf 'Content-Type: application/javascript+module\r\n\r\n'
-  cat dist/worker.js
-  printf "\r\n--%s\r\n" "$BOUNDARY"
   printf 'Content-Disposition: form-data; name="metadata"\r\n'
   printf 'Content-Type: application/json\r\n\r\n'
   printf '%s' "$METADATA"
+  printf "\r\n--%s\r\n" "$BOUNDARY"
+  printf 'Content-Disposition: form-data; name="worker.js"; filename="worker.js"\r\n'
+  printf 'Content-Type: application/javascript+module\r\n\r\n'
+  cat dist/worker.js
   printf "\r\n--%s--\r\n" "$BOUNDARY"
 } > /tmp/tre/upload.bin
 
 echo "Uploading $(wc -c < /tmp/tre/upload.bin) bytes..."
 RESP=$(curl -s -X PUT \
-  -H "Authorization: Bearer $T" \
+  -H "Authorization: Bearer $CF_API_TOKEN" \
   -H "Content-Type: multipart/form-data; boundary=$BOUNDARY" \
   --data-binary @/tmp/tre/upload.bin \
   "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/$NAME")
 echo "$RESP" | jq -c '{success, errors: [.errors[].message], id: .result.id, modified: .result.modified_on}'
+
+# Secrets are stored encrypted on the script and persist across deploys.
+# (Re)set them so a fresh clone can deploy with just env vars:
+curl -s -X PUT -H "Authorization: Bearer $CF_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/$NAME/secrets" \
+  --data "{\"name\":\"OPENCODE_API_KEY\",\"text\":\"$OPENCODE_API_KEY\"}" >/dev/null
+curl -s -X PUT -H "Authorization: Bearer $CF_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/$NAME/secrets" \
+  --data "{\"name\":\"DISCORD_CLIENT_SECRET\",\"text\":\"$DISCORD_CLIENT_SECRET\"}" >/dev/null
+echo "Script secrets set: OPENCODE_API_KEY, DISCORD_CLIENT_SECRET"
