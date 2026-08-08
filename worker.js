@@ -19,7 +19,7 @@
 const FB_DEFAULT_HOST = "pop-party-1-default-rtdb.firebaseio.com";
 const SLOT_DURATION = 20000;   // 20 seconds per question
 const BANK_BATCH = 20;         // questions generated per top-up
-const BANK_MAX = 250;          // reset bank above this size
+const BANK_MAX = 1000;         // reset bank above this size (raised: batch top-ups from GitHub Actions)
 const TOP_UP_THRESHOLD = 20;   // top up when fewer than this many questions remain
 const GEN_LOCK_MS = 45000;     // lock window for concurrent top-ups
 const USED_MAX = 600;          // keep this many past questions in meta.used (FIFO)
@@ -187,7 +187,7 @@ async function generateWithOpenCode(prompt, env) {
         { role: "user", content: prompt },
       ],
       temperature: 0.9,
-      max_tokens: 4096,
+      max_tokens: 16384, // big-pickle is a reasoning model — 4096 was too small, JSON got truncated
     }),
   });
   if (!response.ok) throw new Error(`opencode.ai ${response.status}: ${(await response.text()).slice(0, 200)}`);
