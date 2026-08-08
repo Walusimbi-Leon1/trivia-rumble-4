@@ -217,19 +217,68 @@ body { display: flex; flex-direction: column; min-height: 100vh; }
 
 /* ── Leaderboard ── */
 .lb-card { position: sticky; top: 70px; max-height: calc(100vh - 90px); overflow-y: auto; }
+.lb-card::-webkit-scrollbar { width: 6px; }
+.lb-card::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 .lb-row {
   display: flex; align-items: center; gap: 8px;
-  padding: 7px 8px;
+  padding: 6px 8px;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.03);
-  margin-bottom: 6px;
+  margin-bottom: 5px;
 }
-.lb-row.me { background: rgba(124, 92, 255, 0.12); border: 1px solid rgba(124, 92, 255, 0.4); }
-.lb-row.first { background: rgba(255, 209, 102, 0.08); border: 1px solid rgba(255, 209, 102, 0.35); }
-.lb-rank { width: 24px; text-align: center; font-size: 14px; flex-shrink: 0; }
+.lb-row.me { background: rgba(124, 92, 255, 0.14); border: 1px solid rgba(124, 92, 255, 0.45); }
+.lb-row.first { background: linear-gradient(90deg, rgba(255, 209, 102, 0.12), rgba(255, 209, 102, 0.03)); border: 1px solid rgba(255, 209, 102, 0.4); }
+.lb-row.offline { opacity: 0.45; }
+.lb-rank { width: 26px; text-align: center; flex-shrink: 0; display: flex; justify-content: center; }
+.rank-badge {
+  width: 22px; height: 22px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 11px; color: #fff;
+  flex-shrink: 0;
+}
+.rank-badge.gold {
+  background: linear-gradient(135deg, #ffe08a 0%, #ffb347 55%, #e8921e 100%);
+  box-shadow: 0 0 10px rgba(255, 179, 71, 0.55);
+  color: #6b3a00;
+}
+.rank-badge.gold .crown { color: #7a4500; }
+.rank-badge.silver { background: linear-gradient(135deg, #f0f0f6 0%, #c9c9d6 60%, #9a9aac 100%); color: #3a3a48; box-shadow: 0 0 8px rgba(201, 201, 214, 0.4); }
+.rank-badge.bronze { background: linear-gradient(135deg, #f2b98d 0%, #d9894a 60%, #b06a2c 100%); color: #4a2608; box-shadow: 0 0 8px rgba(217, 137, 74, 0.4); }
+.rank-badge.n { background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.14); color: var(--muted); font-size: 10px; }
 .rank-num { font-weight: 800; color: var(--muted); font-size: 12px; }
-.lb-name { flex: 1; font-weight: 600; font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lb-score { font-weight: 800; font-size: 14px; }
+.lb-name { flex: 1; font-weight: 600; font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+.you-tag {
+  font-size: 8.5px; font-weight: 800; letter-spacing: 0.5px;
+  padding: 1px 5px; border-radius: 6px;
+  background: var(--primary); color: #fff; flex-shrink: 0;
+}
+.lb-score { font-weight: 800; font-size: 13px; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.lb-score .star { color: var(--warning); }
+.star { display: inline-block; vertical-align: -2px; }
+.me-score { display: inline-flex; align-items: center; gap: 3px; }
+.plat-badge {
+  width: 15px; height: 15px; border-radius: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.plat-badge svg { width: 10px; height: 10px; display: block; }
+.plat-badge.discord { background: #5865f2; color: #fff; }
+.plat-badge.browser { background: rgba(255, 255, 255, 0.1); color: var(--muted); }
+.lb-live {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10px; font-weight: 700; color: var(--success);
+  background: rgba(46, 204, 113, 0.12); border: 1px solid rgba(46, 204, 113, 0.3);
+  padding: 2px 8px; border-radius: 999px; margin-left: 6px; vertical-align: 2px;
+}
+.lb-live-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--success);
+  animation: lb-pulse 1.8s ease-in-out infinite;
+}
+@keyframes lb-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.lb-divider {
+  text-align: center; font-size: 10px; letter-spacing: 0.8px; text-transform: uppercase;
+  color: var(--muted); opacity: 0.7; padding: 6px 0 2px;
+}
 .dot {
   width: 8px; height: 8px;
   border-radius: 50%;
@@ -237,7 +286,9 @@ body { display: flex; flex-direction: column; min-height: 100vh; }
   flex-shrink: 0;
 }
 .dot.online { background: var(--success); box-shadow: 0 0 6px rgba(46, 204, 113, 0.6); }
-.my-rank-line { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.my-rank-line { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 4px; }
+.my-rank-line b { color: var(--warning); }
+.my-rank-line .star { color: var(--warning); }
 
 .muted { color: var(--muted); }
 .small { font-size: 12px; }

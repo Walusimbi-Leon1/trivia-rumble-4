@@ -20,7 +20,10 @@ const FB_DEFAULT_HOST = "pop-party-1-default-rtdb.firebaseio.com";
 const SLOT_DURATION = 20000;   // 20 seconds per question
 const BANK_BATCH = 20;         // questions generated per top-up
 const BANK_MAX = 250;          // reset bank above this size
+const TOP_UP_THRESHOLD = 20;   // top up when fewer than this many questions remain
 const GEN_LOCK_MS = 45000;     // lock window for concurrent top-ups
+const USED_MAX = 600;          // keep this many past questions in meta.used (FIFO)
+const AVOID_PROMPT_N = 60;     // how many past questions to send to the AI as "do not repeat"
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -80,6 +83,50 @@ async function fbDelete(env, path) {
 
 function bankCount(bank) {
   return bank && typeof bank === "object" ? Object.keys(bank).length : 0;
+}
+
+// Normalize a question for duplicate comparison (case/space/punct-insensitive).
+function norm(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// ── "No repeats" bookkeeping ────────────────────────────────────────────────
+// meta.used = FIFO array of question texts that have already been served or
+// queued. New AI/static questions are filtered against it, and it is sent to
+// the model so it avoids repeats AND close paraphrases.
+async function readUsed(env) {
+  const meta = (await fbGet(env, "trivia/global/meta").catch(() => null)) || {};
+  return Array.isArray(meta.used) ? meta.used : [];
+}
+
+async function markUsed(env, questions) {
+  if (!questions || !questions.length) return;
+  const meta = (await fbGet(env, "trivia/global/meta").catch(() => null)) || {};
+  const used = Array.isArray(meta.used) ? meta.used : [];
+  for (const q of questions) {
+    if (q?.question) used.push(q.question);
+  }
+  const trimmed = used.slice(-USED_MAX);
+  await fbPatch(env, "trivia/global/meta", { used: trimmed }).catch(() => {});
+}
+
+// Drop questions whose text (normalized) matches anything already used/queued.
+function filterFresh(questions, usedSet, bankSet) {
+  const out = [];
+  const seen = new Set();
+  for (const q of questions) {
+    if (!q?.question) continue;
+    const n = norm(q.question);
+    if (!n) continue;
+    if (usedSet.has(n) || bankSet.has(n) || seen.has(n)) continue;
+    seen.add(n);
+    out.push(q);
+  }
+  return out;
 }
 
 // ── Discord OAuth exchange (Arrow Blast pattern) ────────────────────────────
@@ -170,8 +217,16 @@ function parseQuestions(raw, count) {
   return out;
 }
 
-async function generateQuestions(count, env) {
-  const prompt = `Generate ${count} unique trivia questions spanning a fun mix of categories: science, history, geography, entertainment, sports, technology, general knowledge. Vary the difficulty.
+async function generateQuestions(count, env, avoidTexts) {
+  const avoid =
+    avoidTexts && avoidTexts.length
+      ? "\n\nHere are recently used questions. Do NOT repeat these or closely paraphrase them — make every question fresh and distinct:\n" +
+        avoidTexts
+          .slice(-AVOID_PROMPT_N)
+          .map((t) => `- ${t}`)
+          .join("\n")
+      : "";
+  const prompt = `Generate ${count} unique trivia questions spanning a fun mix of categories: science, history, geography, entertainment, sports, technology, general knowledge. Vary the difficulty.${avoid}
 Return ONLY a JSON array (no markdown) with exactly this structure:
 [{"question":"Question text?","options":["A","B","C","D"],"correctAnswer":0}]
 "correctAnswer" must be the index (0-3) of the correct option.`;
@@ -365,10 +420,11 @@ const QUESTION_BANK = {
   ],
 };
 
-function builtinSeed() {
+function builtinSeed(excludeSet) {
   const all = [];
   for (const cat of CATEGORIES) {
     for (const item of QUESTION_BANK[cat]) {
+      if (excludeSet && excludeSet.has(norm(item.q))) continue;
       all.push({ question: item.q, options: item.o, correctAnswer: item.a });
     }
   }
@@ -380,8 +436,9 @@ function builtinSeed() {
   return all;
 }
 
-function pickQuestions(count) {
-  const all = builtinSeed();
+function pickQuestions(count, usedRaw) {
+  const exclude = usedRaw && usedRaw.length ? new Set(usedRaw.map(norm)) : null;
+  const all = builtinSeed(exclude);
   return all.slice(0, Math.min(count, all.length));
 }
 
@@ -395,74 +452,116 @@ async function handleTrivia(request, env, ctx) {
     const meta = (await fbGet(env, "trivia/global/meta").catch(() => null)) || {};
     const bank = (await fbGet(env, "trivia/global/bank").catch(() => null)) || {};
     const len = bankCount(bank);
+    const usedRaw = Array.isArray(meta.used) ? meta.used : [];
+    const usedSet = new Set(usedRaw.map(norm));
+    const bankSet = new Set(Object.values(bank).filter((q) => q?.question).map((q) => norm(q.question)));
 
     // Someone is already generating — return current state
     if (meta.generating && Date.now() - meta.generating < GEN_LOCK_MS) {
       return json({ bankLen: len, generating: true });
     }
 
-    // Empty bank → seed instantly with built-in questions so the game
-    // is playable immediately; top up with AI questions in the background.
+    // Empty bank → generate a fresh AI batch immediately (fallback: built-ins),
+    // then start the question clock. AI first so the game never opens with the
+    // same static questions every time.
     if (len === 0) {
-      await fbPut(env, "trivia/global/meta", { generating: Date.now() });
-      const seed = builtinSeed();
+      await fbPut(env, "trivia/global/meta", { generating: Date.now(), used: usedRaw });
+      let questions;
+      try {
+        questions = await generateQuestions(count, env, usedRaw);
+      } catch (err) {
+        console.error("[Trivia] opencode.ai failed, using built-in:", err.message);
+        questions = null;
+      }
+      if (!questions || !questions.length) questions = pickQuestions(count, usedRaw);
+      let fresh = filterFresh(questions, usedSet, bankSet);
+      if (!fresh.length) fresh = questions;
+      if (!fresh.length) fresh = builtinSeed();   // absolute last resort — never stall
       const patch = {};
-      seed.forEach((q, i) => (patch[i] = q));
+      fresh.forEach((q, i) => (patch[i] = q));
       await fbPut(env, "trivia/global/bank", patch);
       const game = await fbGet(env, "trivia/global/game").catch(() => null);
       await fbPut(env, "trivia/global/game", {
         questionStart: Date.now(),
         slotDuration: SLOT_DURATION,
-        bankLen: seed.length,
+        bankLen: fresh.length,
         startedAt: game?.startedAt || Date.now(),
       });
+      await markUsed(env, fresh);
       // Kick off AI generation in the background (doesn't block the response)
-      ctxWait(ctx, env, count);
-      return json({ bankLen: seed.length, source: "seed" });
+      ctxWait(ctx, env, count, usedRaw);
+      return json({ bankLen: fresh.length, source: fresh.length ? "ai" : "seed" });
     }
 
-    // Bank low → generate a fresh batch via opencode.ai
-    await fbPut(env, "trivia/global/meta", { generating: Date.now() });
-    let questions;
-    try {
-      questions = await generateQuestions(count, env);
-    } catch (err) {
-      console.error("[Trivia] opencode.ai failed, using built-in:", err.message);
-      questions = pickQuestions(count);
-    }
+    // Bank low → generate fresh batches via opencode.ai (avoiding repeats).
+    // Loop up to 3 rounds of BANK_BATCH so we can also CATCH UP when the bank
+    // is already behind the live slot (e.g. after a long downtime or deploy).
+    await fbPut(env, "trivia/global/meta", { generating: Date.now(), used: usedRaw });
+    const game0 = (await fbGet(env, "trivia/global/game").catch(() => null)) || {};
+    const globalSlot = game0.questionStart ? Math.floor((Date.now() - game0.questionStart) / SLOT_DURATION) : 0;
+    const need = Math.max(count, Math.min(60, globalSlot - len + TOP_UP_THRESHOLD));
 
-    if (len + questions.length > BANK_MAX) {
+    const allAccepted = [];
+    let fromStatic = false;
+    for (let round = 0; round < 3 && allAccepted.length < need; round++) {
+      const want = Math.min(BANK_BATCH, need - allAccepted.length);
+      let batch;
+      try {
+        batch = await generateQuestions(want, env, usedRaw);
+      } catch (err) {
+        console.error("[Trivia] opencode.ai failed, using built-in:", err.message);
+        batch = null;
+      }
+      if (!batch || !batch.length) {
+        batch = pickQuestions(want, usedRaw);
+        fromStatic = true;
+      }
+      let fresh = filterFresh(batch, usedSet, bankSet);
+      if (!fresh.length) fresh = batch;   // never stall the game
+      if (!fresh.length) break;
+      const patch = {};
+      fresh.forEach((q, i) => (patch[len + allAccepted.length + i] = q));
+      await fbPatch(env, "trivia/global/bank", patch);
+      fresh.forEach((q) => q?.question && bankSet.add(norm(q.question)));
+      allAccepted.push(...fresh);
+    }
+    if (!allAccepted.length) {
+      // bank full of used static questions and AI failed — wait for next attempt
+      await fbPut(env, "trivia/global/meta", { generating: 0, used: usedRaw });
+      return json({ bankLen: len, skipped: true });
+    }
+    await markUsed(env, allAccepted);
+    const bankLen = len + allAccepted.length;
+
+    if (bankLen > BANK_MAX) {
       // Bank too big → reset: fresh bank + restart the question clock
       const patch = {};
-      questions.forEach((q, i) => (patch[i] = q));
+      allAccepted.forEach((q, i) => (patch[i] = q));
       await fbPut(env, "trivia/global/bank", patch);
       await fbDelete(env, "trivia/global/answers").catch(() => {});
       await fbPut(env, "trivia/global/game", {
         questionStart: Date.now(),
         slotDuration: SLOT_DURATION,
-        bankLen: questions.length,
+        bankLen: allAccepted.length,
         startedAt: Date.now(),
       });
-      await fbPut(env, "trivia/global/meta", { generating: 0 });
-      return json({ bankLen: questions.length, reset: true });
+      await fbPut(env, "trivia/global/meta", { generating: 0, used: (await readUsed(env)) });
+      return json({ bankLen: allAccepted.length, reset: true, source: fromStatic ? "seed" : "ai" });
     }
 
-    const patch = {};
-    questions.forEach((q, i) => (patch[len + i] = q));
-    await fbPatch(env, "trivia/global/bank", patch);
     const game = await fbGet(env, "trivia/global/game").catch(() => null);
     if (game) {
-      await fbPatch(env, "trivia/global/game", { bankLen: len + questions.length });
+      await fbPatch(env, "trivia/global/game", { bankLen });
     } else {
       await fbPut(env, "trivia/global/game", {
         questionStart: Date.now(),
         slotDuration: SLOT_DURATION,
-        bankLen: len + questions.length,
+        bankLen,
         startedAt: Date.now(),
       });
     }
-    await fbPut(env, "trivia/global/meta", { generating: 0 });
-    return json({ bankLen: len + questions.length, source: questions[0]?.question ? "ai" : "bank" });
+    await fbPut(env, "trivia/global/meta", { generating: 0, used: (await readUsed(env)) });
+    return json({ bankLen, source: fromStatic ? "bank" : "ai" });
   } catch (err) {
     console.error("[Trivia] error:", err.message);
     await fbPut(env, "trivia/global/meta", { generating: 0 }).catch(() => {});
@@ -471,27 +570,36 @@ async function handleTrivia(request, env, ctx) {
 }
 
 // Background AI top-up (used when seeding) — run after the response is sent.
-function ctxWait(ctx, env, count) {
+function ctxWait(ctx, env, count, usedRaw) {
   ctx?.waitUntil?.(
     (async () => {
       try {
+        const used = (await readUsed(env)).slice();
+        const usedSet = new Set(used.map(norm));
+        const bank = (await fbGet(env, "trivia/global/bank").catch(() => null)) || {};
+        const len = bankCount(bank);
+        const bankSet = new Set(Object.values(bank).filter((q) => q?.question).map((q) => norm(q.question)));
         let questions;
         try {
-          questions = await generateQuestions(count, env);
+          questions = await generateQuestions(count, env, used);
         } catch (err) {
           console.error("[Trivia] bg opencode.ai failed:", err.message);
           await fbPut(env, "trivia/global/meta", { generating: 0, lastError: err.message }).catch(() => {});
           return;
         }
-        const bank = (await fbGet(env, "trivia/global/bank").catch(() => null)) || {};
-        const len = bankCount(bank);
+        const fresh = filterFresh(questions, usedSet, bankSet);
+        if (!fresh.length) {
+          await fbPut(env, "trivia/global/meta", { generating: 0 }).catch(() => {});
+          return;
+        }
         const patch = {};
-        questions.forEach((q, i) => (patch[len + i] = q));
+        fresh.forEach((q, i) => (patch[len + i] = q));
         await fbPatch(env, "trivia/global/bank", patch);
         const game = await fbGet(env, "trivia/global/game").catch(() => null);
-        if (game) await fbPatch(env, "trivia/global/game", { bankLen: len + questions.length });
-        await fbPut(env, "trivia/global/meta", { generating: 0 });
-        console.log("[Trivia] bg top-up appended", questions.length);
+        if (game) await fbPatch(env, "trivia/global/game", { bankLen: len + fresh.length });
+        await markUsed(env, fresh);
+        await fbPut(env, "trivia/global/meta", { generating: 0, used: (await readUsed(env)) }).catch(() => {});
+        console.log("[Trivia] bg top-up appended", fresh.length);
       } catch (err) {
         console.error("[Trivia] bg top-up error:", err.message);
         await fbPut(env, "trivia/global/meta", { generating: 0, lastError: err.message }).catch(() => {});

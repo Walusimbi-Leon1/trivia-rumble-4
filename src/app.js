@@ -15,7 +15,6 @@ import { dbRead, dbWrite, dbUpdate, dbDelete, dbWatch } from "./firebase.js";
 // ── Constants ────────────────────────────────────────────────────────────────
 const SLOT_DURATION = 20000;   // must match worker
 const TOP_UP_THRESHOLD = 20;   // request more questions when fewer remain
-const LEADERBOARD_SIZE = 20;
 
 // ── State ────────────────────────────────────────────────────────────────────
 let me = { id: null, username: "Guest", avatarUrl: "", score: 0 };
@@ -34,6 +33,28 @@ let lastAnswerGain = 0;
 
 const $ = (id) => document.getElementById(id);
 const now = () => Date.now() + offset;
+
+// ── SVG icon helpers (crisp at any size, no plain emoji) ────────────────────
+const DISCORD_LOGO =
+  '<svg viewBox="0 0 127.14 96.36" aria-hidden="true"><path fill="currentColor" d="M107.7 8.07A105.15 105.15 0 0 0 81.47 0a72.06 72.06 0 0 0-3.36 6.83 97.68 97.68 0 0 0-39.11 0A72.37 72.37 0 0 0 35.64 0 105.89 105.89 0 0 0 9.39 8.09C-7.21 32.65-1.71 56.6.54 80.21h0A105.73 105.73 0 0 0 32.71 96.36a77.7 77.7 0 0 0 6.89-11.11 68.42 68.42 0 0 1-10.85-5.18c.91-.66 1.8-1.34 2.66-2a75.57 75.57 0 0 0 64.32 0c.87.71 1.76 1.39 2.66 2a68.68 68.68 0 0 1-10.87 5.19 77 77 0 0 0 6.89 11.1A105.25 105.25 0 0 0 126.6 80.22h0C129.24 52.84 122.09 29.11 107.7 8.07ZM42.45 65.69C36.18 65.69 31 60 31 53s5-12.74 11.43-12.74S54 46 53.89 53 48.84 65.69 42.45 65.69Zm42.24 0C78.41 65.69 73.25 60 73.25 53s5-12.74 11.44-12.74S96.23 46 96.12 53 91.08 65.69 84.69 65.69Z"/></svg>';
+const GLOBE_LOGO =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 12h18M12 3c3.2 3.6 3.2 14.4 0 18M12 3c-3.2 3.6-3.2 14.4 0 18" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+function starSvg(size = 14) {
+  return `<svg class="star" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2.6l2.85 6.02 6.65.82-4.9 4.56 1.28 6.56L12 17.3l-5.88 3.26 1.28-6.56-4.9-4.56 6.65-.82z"/></svg>`;
+}
+function crownSvg(size = 14) {
+  return `<svg class="crown" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 17V9.5l4.5 3.5L12 7.5l4.5 5.5L21 9.5V17z"/></svg>`;
+}
+function rankBadge(rank) {
+  if (rank === 1) return `<span class="rank-badge gold" title="#1">${crownSvg(15)}</span>`;
+  if (rank === 2) return `<span class="rank-badge silver" title="#2">2</span>`;
+  if (rank === 3) return `<span class="rank-badge bronze" title="#3">3</span>`;
+  return `<span class="rank-badge n">${rank}</span>`;
+}
+function platformBadge(p) {
+  if (p?.platform === "discord") return `<span class="plat-badge discord" title="Playing from Discord">${DISCORD_LOGO}</span>`;
+  return `<span class="plat-badge browser" title="Playing in browser">${GLOBE_LOGO}</span>`;
+}
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -64,13 +85,16 @@ function showScreen(name) {
 }
 
 // ── Question timing (deterministic, shared by all players) ──────────────────
+// No modulo wrap-around: each bank index is played exactly once, so questions
+// never repeat. The worker tops the bank up ahead of the current slot; if the
+// bank is momentarily exhausted the client shows "Preparing new questions…".
 function currentQuestion() {
   if (!game || !game.questionStart || !bank.length) return null;
   const duration = game.slotDuration || SLOT_DURATION;
   const elapsed = Math.max(0, now() - game.questionStart);
   const slot = Math.floor(elapsed / duration);
-  const idx = slot % bank.length;
-  const q = bank[idx];
+  if (slot >= bank.length) return null;   // bank exhausted — wait for top-up
+  const q = bank[slot];
   if (!q) return null;
   return {
     slot,
@@ -208,6 +232,7 @@ async function joinGlobal() {
     await dbUpdate(`${P}/players/${me.id}`, {
       username: me.username,
       avatarUrl: me.avatarUrl,
+      platform: isDiscord ? "discord" : "browser",
       online: true,
       lastSeen: Date.now(),
     });
@@ -216,6 +241,7 @@ async function joinGlobal() {
       id: me.id,
       username: me.username,
       avatarUrl: me.avatarUrl,
+      platform: isDiscord ? "discord" : "browser",
       score: 0,
       online: true,
       lastSeen: Date.now(),
@@ -227,13 +253,19 @@ async function joinGlobal() {
 }
 
 // ── Bank management ─────────────────────────────────────────────────────────
-async function ensureBank() {
+async function ensureBank(force) {
   if (requestingBank) return;
   requestingBank = true;
   try {
     const snapshot = await dbRead(`${P}/bank`).catch(() => null);
     bank = bankArray(snapshot);
-    if (bank.length >= TOP_UP_THRESHOLD) return;
+    let need = !!force;
+    if (!need && game && game.questionStart) {
+      const duration = game.slotDuration || SLOT_DURATION;
+      const slot = Math.floor((now() - game.questionStart) / duration);
+      need = bank.length - (slot + 1) < TOP_UP_THRESHOLD;
+    }
+    if (!need) return;
 
     const res = await fetch("/api/trivia", {
       method: "POST",
@@ -306,7 +338,7 @@ function renderHeader() {
   el.innerHTML =
     avatarHtml(me, 28) +
     `<span class="me-name">${escapeHtml(me.username)}</span>` +
-    `<span class="me-score">⭐ ${me.score}</span>` +
+    `<span class="me-score">${starSvg(13)} ${me.score}</span>` +
     `<span class="tag ${isDiscord ? "tag-discord" : "tag-browser"}">${isDiscord ? "DISCORD" : "BROWSER"}</span>`;
 }
 
@@ -360,34 +392,46 @@ function updateAnsweredCount() {
 }
 
 function renderLeaderboard() {
-  const list = Object.values(players)
-    .filter((p) => p && (p.score || 0) > 0)
-    .sort((a, b) => (b.score || 0) - (a.score || 0))
-    .slice(0, LEADERBOARD_SIZE);
+  const all = Object.values(players).filter((p) => p && typeof p === "object");
+  const online = all.filter((p) => p.online).sort((a, b) => (b.score || 0) - (a.score || 0));
+  // offline players with points stay visible (dimmed) so the board keeps its history
+  const offline = all.filter((p) => !p.online && (p.score || 0) > 0).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 10);
+  const rows = [...online, ...offline].slice(0, 30);
 
   const el = $("lb-list");
   if (!el) return;
-  el.innerHTML = list.length
-    ? list
+  const liveCount = online.length;
+  const titleEl = $("lb-title");
+  if (titleEl) {
+    titleEl.innerHTML =
+      `Leaderboard <span class="lb-live"><span class="lb-live-dot"></span>${liveCount} live</span>`;
+  }
+
+  el.innerHTML = rows.length
+    ? rows
         .map((p, i) => {
+          const isOffline = !p.online;
           const rank = i + 1;
-          const medal = rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : `<span class="rank-num">${rank}</span>`;
+          const mine = p.id === me.id;
           return `
-          <div class="lb-row ${p.id === me.id ? "me" : ""} ${rank === 1 ? "first" : ""}">
-            <span class="lb-rank">${medal}</span>
-            ${avatarHtml(p, 34)}
-            <span class="lb-name">${escapeHtml(p.username)}</span>
-            ${p.online ? '<span class="dot online" title="online"></span>' : '<span class="dot" title="offline"></span>'}
-            <span class="lb-score">${p.score || 0}</span>
+          <div class="lb-row ${mine ? "me" : ""} ${rank === 1 ? "first" : ""} ${isOffline ? "offline" : ""}">
+            <span class="lb-rank">${rankBadge(rank)}</span>
+            ${avatarHtml(p, 32)}
+            <span class="lb-name">${escapeHtml(p.username)}${mine ? '<span class="you-tag">you</span>' : ""}</span>
+            ${platformBadge(p)}
+            <span class="lb-score">${starSvg(11)} ${p.score || 0}</span>
           </div>`;
         })
-        .join("")
-    : '<p class="muted center">No scores yet — be the first! 🏆</p>';
+        .join("") +
+        (offline.length ? '<div class="lb-divider">earlier today</div>' : "")
+    : '<p class="muted center small">No players yet — open the game and be first!</p>';
 
   const mine = players[me.id];
-  const myRank = Object.values(players).filter((p) => (p?.score || 0) > (mine?.score || 0)).length + 1;
+  const myRank = all.filter((p) => (p?.score || 0) > (mine?.score || 0)).length + 1;
   const rankEl = $("my-rank");
-  if (rankEl) rankEl.textContent = `Your rank: #${myRank} · ⭐ ${mine?.score || 0} pts`;
+  if (rankEl) {
+    rankEl.innerHTML = `Your rank: <b>#${myRank}</b> · ${starSvg(11)} ${mine?.score || 0} pts`;
+  }
 }
 
 function refresh() {
@@ -432,7 +476,7 @@ async function loadSlotAnswers(slot) {
 }
 
 function maybeTopUp(q) {
-  const remaining = bank.length - (q.slot % bank.length);
+  const remaining = bank.length - q.slot;   // no modulo — slots consume the bank linearly
   if (remaining < TOP_UP_THRESHOLD && !requestingBank) {
     ensureBank();
   }
@@ -441,6 +485,13 @@ function maybeTopUp(q) {
 function tick() {
   const q = currentQuestion();
   if (!q) {
+    if (!game || !bank.length) {
+      $("loading-msg").textContent = "Connecting to the arena…";
+    } else {
+      // bank momentarily exhausted — worker is topping up with fresh questions
+      $("loading-msg").textContent = "Preparing new questions…";
+      ensureBank(true);
+    }
     showScreen("loading");
     return;
   }
