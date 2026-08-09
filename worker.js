@@ -19,7 +19,6 @@
 const FB_DEFAULT_HOST = "pop-party-1-default-rtdb.firebaseio.com";
 const SLOT_DURATION = 20000;   // 20 seconds per question
 const BANK_BATCH = 20;         // questions generated per top-up
-const BANK_MAX = 1000;         // reset bank above this size (raised: batch top-ups from GitHub Actions)
 const TOP_UP_THRESHOLD = 20;   // top up when fewer than this many questions remain
 const GEN_LOCK_MS = 45000;     // lock window for concurrent top-ups
 const USED_MAX = 600;          // keep this many past questions in meta.used (FIFO)
@@ -704,22 +703,11 @@ async function handleTrivia(request, env, ctx) {
     await markUsed(env, allAccepted);
     const bankLen = len + allAccepted.length;
 
-    if (bankLen > BANK_MAX) {
-      // Bank too big → reset: fresh bank + restart the question clock
-      allAccepted = normalizeBank(allAccepted);
-      const patch = {};
-      allAccepted.forEach((q, i) => (patch[i] = q));
-      await fbPut(env, "trivia/global/bank", patch);
-      await fbDelete(env, "trivia/global/answers").catch(() => {});
-      await fbPut(env, "trivia/global/game", {
-        questionStart: Date.now(),
-        slotDuration: SLOT_DURATION,
-        bankLen: allAccepted.length,
-        startedAt: Date.now(),
-      });
-      await fbPut(env, "trivia/global/meta", { generating: 0, used: (await readUsed(env)) });
-      return json({ bankLen: allAccepted.length, reset: true, source: fromStatic ? "seed" : "ai" });
-    }
+    // NOTE: no bank-size cap / reset on purpose. The bank ONLY grows — every
+    // question ever generated stays stored forever (Leon's rule). When
+    // generation can't keep up and the live slot reaches the end of the bank,
+    // hardReset() recycles the SAME stored questions (rotated) and restarts
+    // the clock — it never deletes or shrinks the bank.
 
     const game = await fbGet(env, "trivia/global/game").catch(() => null);
     if (game) {
