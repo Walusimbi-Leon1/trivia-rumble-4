@@ -573,7 +573,12 @@ async function handleTrivia(request, env, ctx) {
     // the previous question's letter. Restart the clock so the live slot
     // re-syncs cleanly (player scores persist; only the current question
     // restarts). Self-heals on the first client request after deploy.
-    if (!meta.lettersV2 && len > 0) {
+    // NOTE: the flag lives at trivia/global/lettersV2 (its own path) — meta
+    // is full-replaced by the top-up paths, so a flag there would be
+    // clobbered and the migration would re-run (and restart the clock)
+    // on every top-up.
+    const lettersV2 = await fbGet(env, "trivia/global/lettersV2").catch(() => null);
+    if (!lettersV2 && len > 0) {
       if (meta.lastReset && Date.now() - meta.lastReset < 15000) {
         return json({ bankLen: len, reset: false, recently: true });
       }
@@ -593,7 +598,8 @@ async function handleTrivia(request, env, ctx) {
         bankLen: arr.length,
         startedAt: Date.now(),
       });
-      await fbPut(env, "trivia/global/meta", { generating: 0, lettersV2: 1, lastReset: Date.now(), used: usedRaw });
+      await fbPut(env, "trivia/global/lettersV2", { v: 1, at: Date.now() });
+      await fbPut(env, "trivia/global/meta", { ...meta, generating: 0, lettersV2: 1, lastReset: Date.now(), used: usedRaw });
       return json({ bankLen: arr.length, reset: true, lettersV2: true });
     }
     // Don't let clients hammer back-to-back hard resets (concurrent stuck tabs).
