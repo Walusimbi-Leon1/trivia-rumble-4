@@ -1,12 +1,14 @@
 name: Generate Trivia Questions
 
 # Keep the game's question bank topped up. The game drains ~180 questions/hour
-# (20s per question, clock runs 24/7), so this runs every 30 minutes to keep
-# ~2 hours of runway. Public repo → free unlimited Actions minutes.
+# (20s per question, clock runs 24/7), so this runs every 15 minutes to keep
+# a healthy runway. Public repo → free unlimited Actions minutes. Note: GitHub's
+# scheduler can delay/skip runs under load — the worker's hard-reset recovery
+# (never stall) is the safety net, this workflow is the freshness engine.
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:

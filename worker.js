@@ -457,6 +457,47 @@ function pickQuestions(count, usedRaw) {
   return all.slice(0, Math.min(count, all.length));
 }
 
+// Rotate the bank by a random offset so a recycled round doesn't start with
+// the exact question the previous round ended on.
+function rotateBank(arr) {
+  if (arr.length < 2) return arr;
+  const offset = 1 + Math.floor(Math.random() * (arr.length - 1));
+  return arr.slice(offset).concat(arr.slice(0, offset));
+}
+
+// Emergency hard reset: the live slot has caught up with (or passed) the bank
+// end, so the game would otherwise stall on "Preparing new questions…". Reuse
+// the existing bank (rotated), pad with built-ins if it's tiny, and restart
+// the question clock. Player scores persist; only per-question answers clear.
+async function hardReset(env, bank, len, usedRaw) {
+  let arr = Object.keys(bank)
+    .map((k) => bank[k])
+    .filter((q) => q && q.question);
+  if (arr.length < 100) {
+    // Pad with built-in questions (repeats allowed in an emergency — never stall).
+    const norms = new Set(arr.map((q) => norm(q.question)));
+    for (const q of builtinSeed()) {
+      if (arr.length >= 100) break;
+      if (norms.has(norm(q.question))) continue;
+      arr.push(q);
+      norms.add(norm(q.question));
+    }
+  }
+  const rotated = rotateBank(arr);
+  const patch = {};
+  rotated.forEach((q, i) => (patch[i] = q));
+  await fbPut(env, "trivia/global/bank", patch);
+  await fbDelete(env, "trivia/global/answers").catch(() => {});
+  await fbPut(env, "trivia/global/game", {
+    questionStart: Date.now(),
+    slotDuration: SLOT_DURATION,
+    bankLen: rotated.length,
+    startedAt: Date.now(),
+  });
+  await fbPut(env, "trivia/global/meta", { generating: 0, used: (await readUsed(env)) });
+  return json({ bankLen: rotated.length, reset: true, source: "reuse" });
+}
+
 // ── /api/trivia — ensure the bank has questions ─────────────────────────────
 async function handleTrivia(request, env, ctx) {
   if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -474,6 +515,10 @@ async function handleTrivia(request, env, ctx) {
     // Someone is already generating — return current state
     if (meta.generating && Date.now() - meta.generating < GEN_LOCK_MS) {
       return json({ bankLen: len, generating: true });
+    }
+    // Don't let clients hammer back-to-back hard resets (concurrent stuck tabs).
+    if (meta.lastReset && Date.now() - meta.lastReset < 15000) {
+      return json({ bankLen: len, reset: false, recently: true });
     }
 
     // Empty bank → generate a fresh AI batch immediately (fallback: built-ins),
@@ -514,6 +559,16 @@ async function handleTrivia(request, env, ctx) {
     await fbPut(env, "trivia/global/meta", { generating: Date.now(), used: usedRaw });
     const game0 = (await fbGet(env, "trivia/global/game").catch(() => null)) || {};
     const globalSlot = game0.questionStart ? Math.floor((Date.now() - game0.questionStart) / SLOT_DURATION) : 0;
+
+    // Live slot has caught up with the bank → the game is stuck. Hard-reset:
+    // reuse the bank, restart the clock. Never leave players on
+    // "Preparing new questions…".
+    if (globalSlot >= len) {
+      const res = await hardReset(env, bank, len, usedRaw);
+      await fbPatch(env, "trivia/global/meta", { lastReset: Date.now() }).catch(() => {});
+      return res;
+    }
+
     const need = Math.max(count, Math.min(60, globalSlot - len + TOP_UP_THRESHOLD));
 
     const allAccepted = [];

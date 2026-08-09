@@ -205,7 +205,11 @@ async function syncTime() {
     if (res.ok) {
       const data = await res.json();
       offset = data.now - Date.now();
-      if (data.game && (!game || !game.questionStart)) game = data.game;
+      if (data.game) {
+        // Adopt the clock on first load AND when a hard reset restarts it,
+        // otherwise open tabs stay stuck on the stale questionStart.
+        if (!game || !game.questionStart || data.game.questionStart !== game.questionStart) game = data.game;
+      }
     }
   } catch (e) {
     /* keep previous offset */

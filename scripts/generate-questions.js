@@ -33,7 +33,7 @@
 const SLOT_DURATION = 20000; // 20s per question (matches worker)
 const RUNWAY = 350; // target: bankLen − slot after a run
 const MIN_ADD = 60; // skip unless we'd add at least this many
-const RESET_BEHIND = 150; // slot − bankLen above this → reset the clock
+const RESET_BEHIND = 0; // slot − bankLen >= this → reset the clock (bank exhausted = stuck)
 const CHUNK = 40; // questions per API call (reliable JSON output)
 const MAX_TOKENS = 24000; // big budget: reasoning + 40 questions fits
 const USED_MAX = 600; // keep this many past questions (matches worker)
@@ -150,9 +150,10 @@ Return ONLY a JSON array (no markdown, no reasoning text) with exactly this stru
   return out;
 }
 
-async function generateFresh(want, usedTexts) {
+async function generateFresh(want, usedTexts, bankTexts) {
   const avoidTexts = usedTexts.slice(-AVOID_N);
   const usedSet = new Set(usedTexts.map(norm));
+  const bankSet = new Set((bankTexts || []).map(norm));
   const accepted = [];
   const seen = new Set();
   let attempts = 0;
@@ -170,7 +171,7 @@ async function generateFresh(want, usedTexts) {
     }
     const fresh = batch.filter((q) => {
       const key = norm(q.question);
-      if (usedSet.has(key) || seen.has(key)) return false;
+      if (usedSet.has(key) || bankSet.has(key) || seen.has(key)) return false;
       seen.add(key);
       return true;
     });
@@ -197,33 +198,47 @@ async function main() {
   );
 
   const behind = slot - len;
-  const mode = !game.questionStart || behind > RESET_BEHIND ? "RESET" : "APPEND";
-  const want = mode === "RESET" ? Math.min(RUNWAY, 400) : Math.max(MIN_ADD, RUNWAY - margin);
-
-  if (mode === "APPEND" && want < MIN_ADD) {
-    console.log(`Bank healthy (margin ${margin} ≥ ${RUNWAY - MIN_ADD}) — nothing to do.`);
+  const mode = !game.questionStart || behind >= RESET_BEHIND ? "RESET" : "APPEND";
+  const raw = RUNWAY - margin;
+  if (mode === "APPEND" && raw <= 0) {
+    console.log(`Bank healthy (margin ${margin} ≥ ${RUNWAY}) — nothing to do.`);
     return;
   }
+  const want = mode === "RESET" ? Math.min(RUNWAY, 400) : Math.max(MIN_ADD, raw);
 
   console.log(`Mode: ${mode} — generating up to ${want} questions...`);
-  const fresh = await generateFresh(want, usedRaw);
-  if (!fresh.length) throw new Error("generated 0 fresh questions after retries");
+  const bankTexts = Object.values(bank).filter((q) => q?.question).map((q) => q.question);
+  const fresh = await generateFresh(want, usedRaw, bankTexts);
+  if (!fresh.length && mode === "APPEND") throw new Error("generated 0 fresh questions after retries");
 
   // Lock the bank (worker honors meta.generating and won't top-up concurrently)
   await fbPut(`${P}/meta`, { generating: Date.now(), used: usedRaw });
 
   if (mode === "RESET") {
+    // Fresh questions first (variety), then recycle the old bank (deduped) so
+    // the new round has a long runway even if generation only produced a few.
+    const combined = [];
+    const seenN = new Set();
+    for (const q of [...fresh, ...Object.values(bank)]) {
+      if (!q?.question) continue;
+      const n = norm(q.question);
+      if (seenN.has(n)) continue;
+      seenN.add(n);
+      combined.push(q);
+      if (combined.length >= RUNWAY) break;
+    }
+    if (!combined.length) throw new Error("RESET produced 0 questions (generation failed and bank empty)");
     const patch = {};
-    fresh.forEach((q, i) => (patch[i] = q));
+    combined.forEach((q, i) => (patch[i] = q));
     await fbPut(`${P}/bank`, patch);
     await fbPut(`${P}/game`, {
       questionStart: Date.now(),
       slotDuration: SLOT_DURATION,
-      bankLen: fresh.length,
+      bankLen: combined.length,
       startedAt: now,
     });
     await fbDelete(`${P}/answers`).catch(() => {});
-    console.log(`RESET done: fresh bank of ${fresh.length}, clock restarted.`);
+    console.log(`RESET done: bank of ${combined.length} (${fresh.length} fresh + ${combined.length - fresh.length} recycled), clock restarted.`);
   } else {
     const patch = {};
     fresh.forEach((q, i) => (patch[len + i] = q));
